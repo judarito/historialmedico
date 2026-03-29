@@ -1,0 +1,54 @@
+{
+  "expo": {
+    "name": "Family Health Tracker IA",
+    "slug": "family-health-tracker",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./src/assets/icon-heart-plus.png",
+    "userInterfaceStyle": "dark",
+    "backgroundColor": "#0B1628",
+    "splash": {
+      "image": "./src/assets/family-illustration.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0B1628"
+    },
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.familiahealthtracker.app"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./src/assets/icon-heart-plus.png",
+        "backgroundColor": "#0B1628"
+      },
+      "package": "com.familiahealthtracker.app"
+    },
+    "plugins": [
+      "expo-router",
+      "expo-camera",
+      [
+        "expo-notifications",
+        {
+          "icon": "./src/assets/icon-bell.png",
+          "color": "#0B1628"
+        }
+      ],
+      [
+        "expo-speech-recognition",
+        {
+          "microphonePermission": "Permitir acceso al micrófono para dictar notas de voz",
+          "speechRecognitionPermission": "Permitir reconocimiento de voz para transcribir consultas médicas"
+        }
+      ]
+    ],
+    "scheme": "familyhealth",
+    "web": {
+      "bundler": "metro",
+      "output": "single",
+      "favicon": "./src/assets/icon-heart-plus.png"
+    },
+    "experiments": {
+      "typedRoutes": true
+    }
+  }
+}

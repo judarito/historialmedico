@@ -1,0 +1,165 @@
+// ============================================================
+// VoiceRecordButton
+// Graba voz usando reconocimiento de voz nativo del dispositivo
+// (expo-speech-recognition). No requiere API externa para STT.
+//
+// Props:
+//   onTranscription(text) — llamado con el texto transcrito
+//   size     — diámetro del botón (default 56)
+//   style    — estilos adicionales del contenedor
+//   disabled — deshabilita el botón
+// ============================================================
+
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  Animated,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
+  ViewStyle,
+} from 'react-native';
+import {
+  ExpoSpeechRecognitionModule,
+  useSpeechRecognitionEvent,
+} from 'expo-speech-recognition';
+import { Ionicons } from '@expo/vector-icons';
+import { Colors, Typography } from '../../theme';
+
+interface Props {
+  onTranscription: (text: string) => void;
+  size?:    number;
+  style?:   ViewStyle;
+  disabled?: boolean;
+}
+
+type State = 'idle' | 'recording' | 'processing';
+
+export function VoiceRecordButton({ onTranscription, size = 56, style, disabled }: Props) {
+  const [recState, setRecState] = useState<State>('idle');
+  const [seconds,  setSeconds]  = useState(0);
+  const pendingText = useRef('');
+  const timerRef    = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pulseAnim   = useRef(new Animated.Value(1)).current;
+
+  // ── Pulse while recording ────────────────────────────────────
+  useEffect(() => {
+    if (recState === 'recording') {
+      Animated.loop(
+        Animated.sequence([
+          Animated.timing(pulseAnim, { toValue: 1.18, duration: 600, useNativeDriver: true }),
+          Animated.timing(pulseAnim, { toValue: 1,    duration: 600, useNativeDriver: true }),
+        ])
+      ).start();
+    } else {
+      pulseAnim.stopAnimation();
+      pulseAnim.setValue(1);
+    }
+  }, [recState]);
+
+  // ── Seconds counter ──────────────────────────────────────────
+  useEffect(() => {
+    if (recState === 'recording') {
+      setSeconds(0);
+      timerRef.current = setInterval(() => setSeconds(s => s + 1), 1000);
+    } else {
+      if (timerRef.current) clearInterval(timerRef.current);
+    }
+    return () => { if (timerRef.current) clearInterval(timerRef.current); };
+  }, [recState]);
+
+  // ── Speech recognition events ────────────────────────────────
+  useSpeechRecognitionEvent('result', (event) => {
+    // Accumulate interim + final results
+    const transcript = event.results?.[0]?.transcript ?? '';
+    if (transcript) pendingText.current = transcript;
+  });
+
+  useSpeechRecognitionEvent('end', () => {
+    const text = pendingText.current.trim();
+    pendingText.current = '';
+    setRecState('idle');
+    setSeconds(0);
+    if (text) onTranscription(text);
+  });
+
+  useSpeechRecognitionEvent('error', (event) => {
+    console.warn('VoiceRecordButton error:', event.error, event.message);
+    pendingText.current = '';
+    setRecState('idle');
+    setSeconds(0);
+  });
+
+  // ── Start ────────────────────────────────────────────────────
+  const startRecording = useCallback(async () => {
+    try {
+      const { granted } = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
+      if (!granted) return;
+
+      pendingText.current = '';
+      ExpoSpeechRecognitionModule.start({
+        lang:           'es-CO',
+        interimResults: true,
+        continuous:     false,
+        maxAlternatives: 1,
+      });
+      setRecState('recording');
+    } catch (err) {
+      console.error('VoiceRecordButton start:', err);
+    }
+  }, []);
+
+  // ── Stop ─────────────────────────────────────────────────────
+  const stopRecording = useCallback(() => {
+    ExpoSpeechRecognitionModule.stop();
+    // 'end' event fires → handler above delivers the text
+  }, []);
+
+  // ── Toggle ───────────────────────────────────────────────────
+  function handlePress() {
+    if (disabled || recState === 'processing') return;
+    if (recState === 'idle')      startRecording();
+    else if (recState === 'recording') stopRecording();
+  }
+
+  // ── Render ───────────────────────────────────────────────────
+  const isRecording = recState === 'recording';
+  const btnBg       = isRecording ? Colors.alert : Colors.primary;
+  const iconName: any = isRecording ? 'stop' : 'mic';
+
+  function formatTime(s: number): string {
+    const m = Math.floor(s / 60);
+    return `${m}:${String(s % 60).padStart(2, '0')}`;
+  }
+
+  return (
+    <View style={[styles.wrapper, style]}>
+      {isRecording && (
+        <Text style={styles.timer}>{formatTime(seconds)}</Text>
+      )}
+      <Animated.View style={{ transform: [{ scale: pulseAnim }] }}>
+        <TouchableOpacity
+          style={[
+            styles.btn,
+            { width: size, height: size, borderRadius: size / 2, backgroundColor: btnBg },
+            disabled && styles.btnDisabled,
+          ]}
+          onPress={handlePress}
+          activeOpacity={0.8}
+          disabled={disabled}
+        >
+          <Ionicons name={iconName} size={size * 0.42} color="#fff" />
+        </TouchableOpacity>
+      </Animated.View>
+      <Text style={styles.hint}>{isRecording ? 'Toca para detener' : 'Voz'}</Text>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  wrapper:     { alignItems: 'center', gap: 4 },
+  btn:         { alignItems: 'center', justifyContent: 'center', elevation: 2, shadowColor: '#000', shadowOpacity: 0.15, shadowRadius: 4, shadowOffset: { width: 0, height: 2 } },
+  btnDisabled: { opacity: 0.5 },
+  timer:       { color: Colors.alert, fontSize: Typography.xs, fontWeight: '700', letterSpacing: 1 },
+  hint:        { color: Colors.textMuted, fontSize: 10 },
+});
