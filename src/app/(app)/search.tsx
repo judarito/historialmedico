@@ -13,6 +13,7 @@ import {
 import { router } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { supabase } from '../../services/supabase';
+import { searchGlobalFallback } from '../../services/searchFallback';
 import { Colors, Typography, Spacing, Radius } from '../../theme';
 import { VoiceRecordButton } from '../../components/ui/VoiceRecordButton';
 
@@ -29,6 +30,7 @@ interface SearchResult {
   title:           string;
   subtitle:        string;
   date_ref:        string | null;
+  navigation_id?:  string | null;
   match_score?:    number;
   matched_terms?:  string[];
 }
@@ -86,6 +88,7 @@ export default function SearchScreen() {
   const [expansion,    setExpansion]    = useState<AIExpansion | null>(null);
   const [loading,      setLoading]      = useState(false);
   const [searched,     setSearched]     = useState(false);
+  const [searchError,  setSearchError]  = useState<string | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const inputRef    = useRef<TextInput>(null);
 
@@ -94,7 +97,7 @@ export default function SearchScreen() {
     if (debounceRef.current) clearTimeout(debounceRef.current);
 
     if (!text.trim()) {
-      setResults([]); setExpansion(null);
+      setResults([]); setExpansion(null); setSearchError(null);
       setSearched(false); setLoading(false);
       return;
     }
@@ -104,25 +107,64 @@ export default function SearchScreen() {
   }
 
   async function runSearch(q: string) {
-    const { data, error } = await supabase.functions.invoke('search-ai', {
+    setSearchError(null);
+
+    try {
+      const fallbackResults = await searchGlobalFallback(q, 40);
+      if (fallbackResults.length > 0) {
+        setLoading(false);
+        setSearched(true);
+        setResults(fallbackResults);
+        setExpansion(null);
+        setFilter('all');
+        return;
+      }
+    } catch (fallbackError) {
+      console.warn('search fallback error:', fallbackError);
+    }
+
+    // Intentar primero con la edge function (expansión IA con DeepSeek)
+    const { data, error: fnError } = await supabase.functions.invoke('search-ai', {
       body: { query: q, limit: 40 },
+    });
+
+    if (!fnError && data?.results) {
+      setLoading(false);
+      setSearched(true);
+      const results: SearchResult[] = data.results ?? [];
+      setResults(results);
+      setExpansion(data.expansion ?? null);
+      // Solo aplicar el filtro sugerido por la IA si efectivamente hay resultados
+      // en esa categoría; si no, quedarse en 'all' para no ocultar nada.
+      const suggestedCategory = data.expansion?.category as FilterCategory | undefined;
+      if (suggestedCategory && suggestedCategory !== 'all') {
+        const hasResultsInCategory = results.some(r => r.filter_category === suggestedCategory);
+        setFilter(hasResultsInCategory ? suggestedCategory : 'all');
+      } else {
+        setFilter('all');
+      }
+      return;
+    }
+
+    // Fallback: búsqueda directa sin IA cuando la edge function falla
+    console.warn('search-ai no disponible, usando búsqueda directa:', fnError);
+
+    const { data: rpcData, error: rpcError } = await supabase.rpc('search_global', {
+      p_query: q,
+      p_limit: 40,
     });
 
     setLoading(false);
     setSearched(true);
 
-    if (error || !data) {
-      console.warn('search-ai error:', error);
+    if (rpcError) {
+      console.warn('search_global error:', rpcError);
+      setSearchError('No se pudo completar la búsqueda. Revisa tu conexión.');
       return;
     }
 
-    setResults(data.results ?? []);
-    setExpansion(data.expansion ?? null);
-
-    // Si la IA sugiere un filtro concreto, aplicarlo automáticamente
-    if (data.expansion?.category && data.expansion.category !== 'all') {
-      setFilter(data.expansion.category as FilterCategory);
-    }
+    setResults((rpcData as SearchResult[]) ?? []);
+    setExpansion(null);
   }
 
   function handleVoiceTranscription(text: string) {
@@ -134,9 +176,18 @@ export default function SearchScreen() {
   }
 
   function handleResultPress(item: SearchResult) {
+    if (item.result_type === 'document') {
+      if (item.navigation_id) {
+        router.push({ pathname: '/(app)/visit/[id]', params: { id: item.navigation_id } });
+        return;
+      }
+      router.push({ pathname: '/(app)/member/[id]', params: { id: item.member_id } });
+      return;
+    }
+
     const meta = TYPE_META[item.result_type] ?? TYPE_META.member;
     if (meta.navTarget === 'visit') {
-      router.push({ pathname: '/(app)/visit/[id]', params: { id: item.result_id } });
+      router.push({ pathname: '/(app)/visit/[id]', params: { id: item.navigation_id ?? item.result_id } });
     } else {
       router.push({ pathname: '/(app)/member/[id]', params: { id: item.member_id } });
     }
@@ -295,6 +346,15 @@ export default function SearchScreen() {
         <View style={styles.stateCenter}>
           <ActivityIndicator color={Colors.primary} size="large" />
           <Text style={styles.stateText}>Analizando con IA...</Text>
+        </View>
+      ) : searchError ? (
+        <View style={styles.stateCenter}>
+          <Ionicons name="warning-outline" size={48} color={Colors.warning} />
+          <Text style={styles.stateTitle}>Error de búsqueda</Text>
+          <Text style={styles.stateText}>{searchError}</Text>
+          <TouchableOpacity onPress={() => runSearch(query.trim())} style={styles.clearFilterBtn}>
+            <Text style={styles.clearFilterText}>Reintentar</Text>
+          </TouchableOpacity>
         </View>
       ) : filtered.length === 0 ? (
         <View style={styles.stateCenter}>

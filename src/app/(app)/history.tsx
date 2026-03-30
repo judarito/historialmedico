@@ -12,6 +12,7 @@ import {
 } from 'react-native';
 import { useLocalSearchParams, router } from 'expo-router';
 import { supabase } from '../../services/supabase';
+import { searchMemberHistoryLocal } from '../../services/searchFallback';
 import { Colors, Radius, Spacing, Typography } from '../../theme';
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -40,10 +41,13 @@ interface MedicalVisit {
 
 interface Prescription {
   id: string;
+  medical_visit_id: string | null;
   medication_name: string;
+  presentation: string | null;
   dose_amount: string | number | null;
   dose_unit: string | null;
   frequency_text: string | null;
+  instructions: string | null;
   start_at: string | null;
   end_at: string | null;
   status: PrescriptionStatus;
@@ -52,10 +56,12 @@ interface Prescription {
 
 interface MedicalTest {
   id: string;
+  medical_visit_id: string | null;
   test_name: string;
   category: string | null;
   ordered_at: string | null;
   due_at: string | null;
+  notes: string | null;
   status: TestStatus;
   created_at: string;
 }
@@ -65,7 +71,7 @@ interface SearchResult {
   result_id: string;
   title: string;
   subtitle: string;
-  date_ref: string;
+  date_ref: string | null;
 }
 
 type TabKey = 'visits' | 'medications' | 'exams';
@@ -135,7 +141,7 @@ function SearchResultIcon({ type }: { type: string }) {
   const icon =
     type === 'visit'      ? '📅' :
     type === 'medication' ? '💊' :
-    type === 'exam'       ? '🧪' : '📄';
+    type === 'test' || type === 'exam' ? '🧪' : '📄';
   return <Text style={styles.searchResultIcon}>{icon}</Text>;
 }
 
@@ -170,6 +176,7 @@ export default function HistoryScreen() {
         .from('medical_visits')
         .select('*')
         .eq('family_member_id', memberId)
+        .is('deleted_at', null)
         .order('visit_date', { ascending: false }),
       supabase
         .from('prescriptions')
@@ -195,6 +202,98 @@ export default function HistoryScreen() {
 
   // ── search ────────────────────────────────────────────────────────────
 
+  // Construye un resumen compacto de los datos ya cargados en memoria
+  // para alimentar a DeepSeek solo cuando la búsqueda determinística falla.
+  function buildMemberContext(): string {
+    const parts: string[] = [];
+
+    const visitSummaries = visits.slice(0, 20)
+      .map(v => [v.diagnosis, v.reason_for_visit, v.doctor_name, v.specialty].filter(Boolean).join(', '))
+      .filter(Boolean);
+    if (visitSummaries.length > 0)
+      parts.push(`Visitas: ${visitSummaries.join(' | ')}`);
+
+    const medNames = [...new Set(prescriptions.map(p => p.medication_name))].slice(0, 25);
+    if (medNames.length > 0)
+      parts.push(`Medicamentos: ${medNames.join(', ')}`);
+
+    const testNames = [...new Set(tests.map(t => t.test_name))].slice(0, 25);
+    if (testNames.length > 0)
+      parts.push(`Exámenes: ${testNames.join(', ')}`);
+
+    return parts.join('\n');
+  }
+
+  async function runSearch(q: string) {
+    setSearchLoading(true);
+    setSearchResults([]);
+
+    const localResults = searchMemberHistoryLocal({
+      query: q,
+      visits,
+      prescriptions,
+      tests,
+    });
+
+    if (localResults.length > 0) {
+      setSearchResults(localResults as SearchResult[]);
+      setSearchLoading(false);
+      return;
+    }
+
+    // Fase 1: búsqueda determinística directa en BD
+    const { data: directData } = await supabase.rpc('search_medical_history', {
+      p_family_member_id: memberId,
+      p_query: q,
+    });
+
+    if (directData && directData.length > 0) {
+      setSearchResults(directData as SearchResult[]);
+      setSearchLoading(false);
+      return;
+    }
+
+    // Fase 2: sin resultados → llamar IA con contexto del paciente
+    // El contexto se construye desde datos ya en memoria (sin llamadas extra a BD)
+    const memberContext = buildMemberContext();
+
+    const { data: aiData, error: aiError } = await supabase.functions.invoke('search-ai', {
+      body: { query: q, limit: 20, memberContext },
+    });
+
+    if (aiError || !aiData?.expansion?.terms) {
+      setSearchLoading(false);
+      return;
+    }
+
+    // Buscar con cada término expandido por la IA
+    const seen = new Set<string>();
+    const merged: SearchResult[] = [];
+
+    await Promise.all(
+      aiData.expansion.terms.map(async (term: string) => {
+        const { data: termData } = await supabase.rpc('search_medical_history', {
+          p_family_member_id: memberId,
+          p_query: term,
+        });
+        for (const row of (termData as SearchResult[]) ?? []) {
+          if (!seen.has(row.result_id)) {
+            seen.add(row.result_id);
+            merged.push(row);
+          }
+        }
+      })
+    );
+
+    merged.sort((a, b) =>
+      (b.date_ref ? new Date(b.date_ref).getTime() : 0) -
+      (a.date_ref ? new Date(a.date_ref).getTime() : 0)
+    );
+
+    setSearchResults(merged);
+    setSearchLoading(false);
+  }
+
   useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current);
 
@@ -205,14 +304,7 @@ export default function HistoryScreen() {
     }
 
     setSearchLoading(true);
-    debounceRef.current = setTimeout(async () => {
-      const { data } = await supabase.rpc('search_medical_history', {
-        p_family_member_id: memberId,
-        p_query: searchQuery.trim(),
-      });
-      setSearchResults((data as SearchResult[]) ?? []);
-      setSearchLoading(false);
-    }, 500);
+    debounceRef.current = setTimeout(() => runSearch(searchQuery.trim()), 500);
 
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current);
@@ -223,14 +315,21 @@ export default function HistoryScreen() {
 
   function renderVisitItem({ item }: { item: MedicalVisit }) {
     return (
-      <View style={styles.card}>
+      <TouchableOpacity
+        style={styles.card}
+        activeOpacity={0.7}
+        onPress={() => router.push({ pathname: '/(app)/visit/[id]', params: { id: item.id } })}
+      >
         <View style={styles.cardRow}>
           <Text style={styles.cardDate}>{formatDate(item.visit_date)}</Text>
-          {item.status === 'cancelled' && (
-            <View style={[styles.badge, { backgroundColor: Colors.alertBg, borderColor: Colors.alert }]}>
-              <Text style={[styles.badgeText, { color: Colors.alert }]}>Cancelada</Text>
-            </View>
-          )}
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+            {item.status === 'cancelled' && (
+              <View style={[styles.badge, { backgroundColor: Colors.alertBg, borderColor: Colors.alert }]}>
+                <Text style={[styles.badgeText, { color: Colors.alert }]}>Cancelada</Text>
+              </View>
+            )}
+            <Text style={styles.chevron}>›</Text>
+          </View>
         </View>
         {!!item.doctor_name && (
           <Text style={styles.cardTitle}>{item.doctor_name}</Text>
@@ -243,7 +342,7 @@ export default function HistoryScreen() {
             {truncate(item.diagnosis, 80)}
           </Text>
         )}
-      </View>
+      </TouchableOpacity>
     );
   }
 
@@ -289,15 +388,24 @@ export default function HistoryScreen() {
   }
 
   function renderSearchResult({ item }: { item: SearchResult }) {
+    const isVisit = item.result_type === 'visit';
     return (
-      <View style={styles.searchResultItem}>
+      <TouchableOpacity
+        style={styles.searchResultItem}
+        activeOpacity={isVisit ? 0.7 : 1}
+        onPress={isVisit
+          ? () => router.push({ pathname: '/(app)/visit/[id]', params: { id: item.result_id } })
+          : undefined
+        }
+      >
         <SearchResultIcon type={item.result_type} />
         <View style={styles.searchResultText}>
-          <Text style={styles.searchResultTitle}>{item.title}</Text>
-          <Text style={styles.searchResultSub}>{item.subtitle}</Text>
+          <Text style={styles.searchResultTitle}>{item.title || '(sin título)'}</Text>
+          {!!item.subtitle && <Text style={styles.searchResultSub}>{item.subtitle}</Text>}
+          <Text style={styles.searchResultDate}>{formatDate(item.date_ref)}</Text>
         </View>
-        <Text style={styles.searchResultDate}>{formatDate(item.date_ref)}</Text>
-      </View>
+        {isVisit && <Text style={styles.chevron}>›</Text>}
+      </TouchableOpacity>
     );
   }
 
@@ -653,5 +761,10 @@ const styles = StyleSheet.create({
     fontSize: Typography.xs,
     color: Colors.textMuted,
     marginLeft: Spacing.sm,
+  },
+  chevron: {
+    fontSize: Typography.lg,
+    color: Colors.textMuted,
+    lineHeight: Typography.lg,
   },
 });

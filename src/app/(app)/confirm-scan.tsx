@@ -33,7 +33,7 @@ interface ExtractedTest {
 }
 
 export default function ConfirmScanRoute() {
-  const { documentId, memberName, visitDate, doctorName, manual, processingError } = useLocalSearchParams<{
+  const { documentId, memberName, visitId, visitDate, doctorName, manual, processingError } = useLocalSearchParams<{
     documentId: string;
     memberName: string;
     visitId?:   string;
@@ -42,12 +42,13 @@ export default function ConfirmScanRoute() {
     manual?: string;
     processingError?: string;
   }>();
-  const [status,   setStatus]   = useState<'loading' | 'ready' | 'error'>('loading');
-  const [meds,     setMeds]     = useState<ExtractedMed[]>([]);
-  const [tests,    setTests]    = useState<ExtractedTest[]>([]);
-  const [saving,   setSaving]   = useState(false);
-  const [attempts, setAttempts] = useState(0);
-  const [errorMessage, setErrorMessage] = useState(processingError ?? '');
+  const [status,            setStatus]            = useState<'loading' | 'ready' | 'error'>('loading');
+  const [meds,              setMeds]              = useState<ExtractedMed[]>([]);
+  const [tests,             setTests]             = useState<ExtractedTest[]>([]);
+  const [saving,            setSaving]            = useState(false);
+  const [attempts,          setAttempts]          = useState(0);
+  const [errorMessage,      setErrorMessage]      = useState(processingError ?? '');
+  const [detectedVisitDate, setDetectedVisitDate] = useState<string | null>(null);
 
   useEffect(() => {
     if (manual === '1') {
@@ -75,6 +76,17 @@ export default function ConfirmScanRoute() {
         setMeds(parsed?.medications ?? []);
         setTests(parsed?.tests ?? []);
         setErrorMessage('');
+
+        // Si la IA detectó una fecha en la fórmula, compararla con la fecha de la visita
+        const aiDate = parsed?.visit_date as string | null | undefined;
+        if (aiDate) {
+          const aiDateOnly   = toDateOnly(aiDate);
+          const visitDateOnly = toDateOnly(visitDate ?? '');
+          if (aiDateOnly && aiDateOnly !== visitDateOnly) {
+            setDetectedVisitDate(aiDate);
+          }
+        }
+
         setStatus('ready');
         return;
       }
@@ -92,14 +104,30 @@ export default function ConfirmScanRoute() {
     if (!documentId) return;
     setSaving(true);
 
+    // Sanitizar campos numéricos: 0 o negativo → null para no violar constraints
+    const safeMeds = meds.map(m => ({
+      ...m,
+      dose_amount:    (m.dose_amount   != null && m.dose_amount   > 0) ? m.dose_amount   : null,
+      duration_days:  (m.duration_days != null && m.duration_days > 0) ? m.duration_days : null,
+      interval_hours: (m.interval_hours != null && m.interval_hours > 0) ? m.interval_hours : null,
+    }));
+
     const { error } = await supabase.rpc('confirm_document_and_create_records', {
       p_document_id: documentId,
-      p_medications: meds as any,
+      p_medications: safeMeds as any,
       p_tests:       tests as any,
     });
 
+    if (error) { setSaving(false); Alert.alert('Error al guardar', error.message); return; }
+
+    // Si la IA detectó una fecha distinta a la de la visita, actualizarla
+    if (detectedVisitDate && visitId) {
+      const newDate = new Date(detectedVisitDate).toISOString();
+      await supabase.from('medical_visits').update({ visit_date: newDate }).eq('id', visitId);
+      await supabase.from('medical_documents').update({ captured_at: newDate }).eq('id', documentId);
+    }
+
     setSaving(false);
-    if (error) { Alert.alert('Error al guardar', error.message); return; }
 
     const hasEntries = meds.some(m => m.medication_name.trim()) || tests.some(t => t.test_name.trim());
     Alert.alert(
@@ -210,6 +238,19 @@ export default function ConfirmScanRoute() {
           <View style={styles.warningBox}>
             <Ionicons name="warning-outline" size={16} color={Colors.warning} />
             <Text style={styles.warningText}>{errorMessage}</Text>
+          </View>
+        )}
+
+        {!!detectedVisitDate && (
+          <View style={[styles.warningBox, { borderColor: Colors.info + '55', backgroundColor: Colors.infoBg }]}>
+            <Ionicons name="calendar-outline" size={16} color={Colors.info} />
+            <Text style={[styles.warningText, { flex: 1 }]}>
+              La IA detectó la fecha{' '}
+              <Text style={{ fontWeight: '700', color: Colors.textPrimary }}>
+                {new Date(detectedVisitDate).toLocaleDateString('es-CO', { day: '2-digit', month: 'short', year: 'numeric' })}
+              </Text>
+              {' '}en la fórmula.{'\n'}Al confirmar, la visita y el documento quedarán con esa fecha.
+            </Text>
           </View>
         )}
 
@@ -331,6 +372,14 @@ function EditField({ label, value, onChangeText, placeholder, keyboardType, mult
 }
 
 function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
+
+function toDateOnly(iso: string): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: Colors.background },

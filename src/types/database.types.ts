@@ -133,6 +133,8 @@ export interface Database {
           voice_note_url:    string | null;
           voice_note_text:   string | null;
           status:            VisitStatus;
+          deleted_at:        string | null;
+          deleted_by:        string | null;
           created_by:        string;
           created_at:        string;
           updated_at:        string;
@@ -363,6 +365,14 @@ export interface Database {
           p_medications: Json;
           p_tests:       Json;
         };
+        Returns: Json;
+      };
+      soft_delete_medical_visit: {
+        Args: { p_visit_id: string };
+        Returns: boolean;
+      };
+      delete_medical_document_attachment: {
+        Args: { p_document_id: string };
         Returns: Json;
       };
       user_belongs_to_tenant: {

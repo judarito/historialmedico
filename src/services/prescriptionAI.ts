@@ -7,7 +7,7 @@
 
 import * as FileSystem from "expo-file-system";
 import * as ImageManipulator from "expo-image-manipulator";
-import { supabase } from "./supabase";
+import { publicSupabaseUrl, supabase, supabaseInitError } from "./supabase";
 import type { Json } from "../types/database.types";
 
 export interface ExtractedMedication {
@@ -146,13 +146,15 @@ export class PrescriptionAIService {
   // La función actualiza medical_documents.parsed_json
   // --------------------------------------------------------
   static async processWithAI(documentId: string): Promise<AIExtractionResult> {
+    if (supabaseInitError) {
+      throw supabaseInitError;
+    }
+
     const { data: { session } } = await supabase.auth.getSession();
     if (!session) throw new Error("Sesión no válida");
 
-    const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL!;
-
     const response = await fetch(
-      `${supabaseUrl}/functions/v1/process-prescription`,
+      `${publicSupabaseUrl}/functions/v1/process-prescription`,
       {
         method:  "POST",
         headers: {

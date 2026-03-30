@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { supabase } from '../services/supabase';
 import type { Database } from '../types/database.types';
+import { captureException, markBootStep } from '../services/runtimeDiagnostics';
 
 type Tenant       = Database['public']['Tables']['tenants']['Row'];
 type Family       = Database['public']['Tables']['families']['Row'];
@@ -35,44 +36,55 @@ export const useFamilyStore = create<FamilyState>((set, get) => ({
   loading: false,
 
   fetchTenantAndFamily: async () => {
-    set({ loading: true });
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) { set({ loading: false }); return; }
+    try {
+      set({ loading: true });
+      await markBootStep('familyStore.fetchTenantAndFamily:getUser');
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) { set({ loading: false }); return; }
 
-    // Profile tiene tenant_id
-    const { data: profile } = await supabase
-      .from('profiles')
-      .select('tenant_id')
-      .eq('id', user.id)
-      .single();
+      const { data: profile } = await supabase
+        .from('profiles')
+        .select('tenant_id')
+        .eq('id', user.id)
+        .single();
 
-    if (!profile?.tenant_id) { set({ loading: false }); return; }
+      if (!profile?.tenant_id) { set({ loading: false }); return; }
 
-    const [{ data: tenant }, { data: families }] = await Promise.all([
-      supabase.from('tenants').select('*').eq('id', profile.tenant_id).single(),
-      supabase.from('families').select('*').eq('tenant_id', profile.tenant_id).eq('is_active', true).limit(1),
-    ]);
+      await markBootStep('familyStore.fetchTenantAndFamily:loadTenant');
+      const [{ data: tenant }, { data: families }] = await Promise.all([
+        supabase.from('tenants').select('*').eq('id', profile.tenant_id).single(),
+        supabase.from('families').select('*').eq('tenant_id', profile.tenant_id).eq('is_active', true).limit(1),
+      ]);
 
-    set({
-      tenant:  tenant ?? null,
-      family:  families?.[0] ?? null,
-      loading: false,
-    });
+      set({
+        tenant:  tenant ?? null,
+        family:  families?.[0] ?? null,
+        loading: false,
+      });
+    } catch (error) {
+      await captureException('familyStore.fetchTenantAndFamily', error);
+      set({ loading: false });
+    }
   },
 
   fetchMembers: async () => {
-    const { family } = get();
-    if (!family) return;
-    set({ loading: true });
+    try {
+      const { family } = get();
+      if (!family) return;
+      set({ loading: true });
 
-    const { data } = await supabase
-      .from('family_members')
-      .select('*')
-      .eq('family_id', family.id)
-      .eq('is_active', true)
-      .order('created_at');
+      const { data } = await supabase
+        .from('family_members')
+        .select('*')
+        .eq('family_id', family.id)
+        .eq('is_active', true)
+        .order('created_at');
 
-    set({ members: data ?? [], loading: false });
+      set({ members: data ?? [], loading: false });
+    } catch (error) {
+      await captureException('familyStore.fetchMembers', error);
+      set({ loading: false });
+    }
   },
 
   createTenantWithFamily: async (familyName) => {

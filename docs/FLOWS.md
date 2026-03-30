@@ -191,25 +191,55 @@ await supabase.rpc("mark_dose", {
 ## Flujo 8: Búsqueda en Historial
 
 ```typescript
-// Buscar "amoxicilina" en historial de Juan Pablo
-const { data: results } = await supabase.rpc("search_medical_history", {
+// 1. Intentar primero búsqueda local con los datos ya cargados del miembro
+const localResults = searchMemberHistoryLocal({
+  query: "amoxicilina",
+  visits,
+  prescriptions,
+  tests
+});
+
+// 2. Si no hay resultados, usar RPC determinística
+const { data: directData } = await supabase.rpc("search_medical_history", {
   p_family_member_id: memberId,
   p_query: "amoxicilina"
 });
 
-// Retorna: [
-//   { result_type: "medication", title: "Amoxicilina", subtitle: "Cápsulas 500mg", date_ref: "2025-03-15" }
-// ]
+// 3. Si tampoco hay resultados, expandir con IA usando contexto del paciente
+const { data: aiData } = await supabase.functions.invoke("search-ai", {
+  body: {
+    query: "amoxicilina",
+    limit: 20,
+    memberContext: buildMemberContext()
+  }
+});
+```
 
-// Buscar "exámenes pendientes"
-const { data: tests } = await supabase.rpc("get_pending_tests", {
-  p_family_member_id: memberId
+**Orden actual del historial:** fallback local → `search_medical_history` → `search-ai` + reintento por términos expandidos
+
+---
+
+## Flujo 9: Búsqueda Global (Home)
+
+```typescript
+// 1. Intentar primero fallback local desde cliente
+const fallbackResults = await searchGlobalFallback("amoxicilina", 40);
+
+// 2. Si no hubo resultados, usar expansión IA
+const { data: aiData } = await supabase.functions.invoke("search-ai", {
+  body: { query: "amoxicilina", limit: 40 }
+});
+
+// 3. Si la edge function falla, fallback a RPC
+const { data: rpcData } = await supabase.rpc("search_global", {
+  p_query: "amoxicilina",
+  p_limit: 40
 });
 ```
 
 ---
 
-## Flujo 9: Subir Resultado de Examen
+## Flujo 10: Subir Resultado de Examen
 
 ```typescript
 // 1. Subir imagen/PDF del resultado
@@ -229,6 +259,48 @@ await supabase
   })
   .eq("id", testId);
 ```
+
+---
+
+## Flujo 11: Borrado implementado
+
+### 11A. Eliminar adjunto de visita
+
+```
+Usuario abre visit/[id]
+        ↓
+Selecciona adjunto
+        ↓
+"Eliminar adjunto"
+        ↓
+RPC `delete_medical_document_attachment(p_document_id)`
+        ↓
+Si no tiene derivados:
+  delete medical_documents row
+  ↓
+  remove() del archivo en Storage
+Si tiene derivados confirmados:
+  la RPC bloquea el borrado
+```
+
+### 11B. Eliminar visita
+
+```
+Usuario abre visit/[id]
+        ↓
+"Eliminar visita"
+        ↓
+RPC `soft_delete_medical_visit(p_visit_id)`
+        ↓
+UPDATE logical:
+  status='cancelled'
+  deleted_at=NOW()
+  deleted_by=auth.uid()
+        ↓
+La visita deja de salir en listados, historial y búsquedas normales
+```
+
+**Nota:** en la política actual no hay hard delete de visitas desde la UI.
 
 ---
 

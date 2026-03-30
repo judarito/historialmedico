@@ -11,6 +11,7 @@ import {
   Modal,
   Image,
   Alert,
+  Platform,
 } from 'react-native';
 import { useLocalSearchParams, router, useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
@@ -67,6 +68,47 @@ function formatAudioTime(ms: number): string {
   return `${minutes}:${String(seconds).padStart(2, '0')}`;
 }
 
+function showAlert(title: string, message: string) {
+  if (Platform.OS === 'web') {
+    globalThis.alert?.([title, message].filter(Boolean).join('\n\n'));
+    return;
+  }
+
+  Alert.alert(title, message);
+}
+
+function showConfirm(params: {
+  title: string;
+  message: string;
+  confirmLabel?: string;
+  onConfirm: () => void;
+}) {
+  const { title, message, confirmLabel = 'Aceptar', onConfirm } = params;
+
+  if (Platform.OS === 'web') {
+    const accepted = globalThis.confirm?.([title, message].filter(Boolean).join('\n\n')) ?? false;
+    if (accepted) onConfirm();
+    return;
+  }
+
+  Alert.alert(title, message, [
+    { text: 'Cancelar', style: 'cancel' },
+    { text: confirmLabel, style: 'destructive', onPress: onConfirm },
+  ]);
+}
+
+function isMissingRpc(error: { message?: string | null; details?: string | null } | null): boolean {
+  const haystack = `${error?.message ?? ''} ${error?.details ?? ''}`.toLowerCase();
+  return (
+    haystack.includes('delete_medical_document_attachment') ||
+    haystack.includes('soft_delete_medical_visit')
+  ) && (
+    haystack.includes('does not exist') ||
+    haystack.includes('schema cache') ||
+    haystack.includes('could not find')
+  );
+}
+
 export default function VisitDetailRoute() {
   const { id } = useLocalSearchParams<{ id: string }>();
 
@@ -81,6 +123,8 @@ export default function VisitDetailRoute() {
   const [audioPlaying, setAudioPlaying] = useState(false);
   const [audioPositionMillis, setAudioPositionMillis] = useState(0);
   const [audioDurationMillis, setAudioDurationMillis] = useState(0);
+  const [deletingDocId, setDeletingDocId] = useState<string | null>(null);
+  const [deletingVisit, setDeletingVisit] = useState(false);
 
   // Recargar al volver del scan (después de adjuntar un documento)
   useFocusEffect(useCallback(() => { load(); }, [id]));
@@ -96,7 +140,7 @@ export default function VisitDetailRoute() {
   async function load() {
     if (!id) return;
     const [visitRes, docsRes] = await Promise.all([
-      supabase.from('medical_visits').select('*').eq('id', id).single(),
+      supabase.from('medical_visits').select('*').eq('id', id).is('deleted_at', null).single(),
       supabase
         .from('medical_documents')
         .select('*')
@@ -131,7 +175,7 @@ export default function VisitDetailRoute() {
 
   async function openDocument(doc: MedicalDocument) {
     if (!doc.file_path) {
-      Alert.alert('Sin archivo original', 'Este adjunto no tiene archivo original disponible.');
+      showAlert('Sin archivo original', 'Este adjunto no tiene archivo original disponible.');
       return;
     }
 
@@ -147,7 +191,7 @@ export default function VisitDetailRoute() {
     if (error || !data?.signedUrl) {
       setPreviewLoading(false);
       setPreviewDoc(null);
-      Alert.alert('Error', error?.message ?? 'No se pudo abrir el adjunto original.');
+      showAlert('Error', error?.message ?? 'No se pudo abrir el adjunto original.');
       return;
     }
 
@@ -187,6 +231,150 @@ export default function VisitDetailRoute() {
       return;
     }
     await audioSound.playAsync();
+  }
+
+  function confirmDeleteDocument(doc: MedicalDocument) {
+    showConfirm({
+      title: 'Eliminar adjunto',
+      message: 'Se eliminará este archivo de la visita. Si ya generó medicamentos o exámenes confirmados, el sistema bloqueará el borrado.',
+      confirmLabel: 'Eliminar',
+      onConfirm: () => { void deleteDocument(doc); },
+    });
+  }
+
+  async function deleteDocument(doc: MedicalDocument) {
+    setDeletingDocId(doc.id);
+    try {
+      let deletedFilePath = doc.file_path;
+
+      const { data, error } = await supabase.rpc('delete_medical_document_attachment', {
+        p_document_id: doc.id,
+      });
+
+      if (error && !isMissingRpc(error)) {
+        showAlert('No se pudo eliminar', error.message);
+        return;
+      }
+
+      if (error && isMissingRpc(error)) {
+        const [{ data: linkedPrescriptions, error: rxError }, { data: linkedTests, error: testsError }] = await Promise.all([
+          supabase
+            .from('prescriptions')
+            .select('id')
+            .eq('medical_document_id', doc.id)
+            .limit(1),
+          supabase
+            .from('medical_tests')
+            .select('id')
+            .eq('medical_document_id', doc.id)
+            .limit(1),
+        ]);
+
+        if (rxError || testsError) {
+          throw rxError ?? testsError;
+        }
+
+        if ((linkedPrescriptions?.length ?? 0) > 0 || (linkedTests?.length ?? 0) > 0) {
+          showAlert(
+            'No se puede eliminar',
+            'Este adjunto ya generó datos clínicos confirmados.'
+          );
+          return;
+        }
+
+        const { error: deleteError } = await supabase
+          .from('medical_documents')
+          .delete()
+          .eq('id', doc.id);
+
+        if (deleteError) {
+          showAlert('No se pudo eliminar', deleteError.message);
+          return;
+        }
+      } else {
+        deletedFilePath = (data as { file_path?: string } | null)?.file_path ?? doc.file_path;
+      }
+
+      if (deletedFilePath) {
+        const { error: storageError } = await supabase.storage
+          .from('medical-documents')
+          .remove([deletedFilePath]);
+
+        if (storageError) {
+          console.warn('storage remove error:', storageError);
+          showAlert(
+            'Adjunto eliminado',
+            'El adjunto se quitó del historial, pero no se pudo limpiar el archivo original en Storage.'
+          );
+        }
+      }
+
+      if (previewDoc?.id === doc.id) {
+        await closePreview();
+      }
+
+      setDocs((current) => current.filter((item) => item.id !== doc.id));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Ocurrió un error inesperado.';
+      showAlert('No se pudo eliminar', message);
+    } finally {
+      setDeletingDocId(null);
+    }
+  }
+
+  function confirmDeleteVisit() {
+    if (!visit) return;
+
+    showConfirm({
+      title: 'Eliminar visita',
+      message: 'La visita se ocultará del historial normal. Sus datos quedarán preservados como borrado lógico.',
+      confirmLabel: 'Eliminar',
+      onConfirm: () => { void softDeleteVisit(); },
+    });
+  }
+
+  async function softDeleteVisit() {
+    if (!visit) return;
+    setDeletingVisit(true);
+    try {
+      const { error } = await supabase.rpc('soft_delete_medical_visit', {
+        p_visit_id: visit.id,
+      });
+
+      if (error && !isMissingRpc(error)) {
+        showAlert('No se pudo eliminar', error.message);
+        return;
+      }
+
+      if (error && isMissingRpc(error)) {
+        const { data: authData, error: authError } = await supabase.auth.getUser();
+        if (authError) {
+          throw authError;
+        }
+
+        const { error: fallbackError } = await supabase
+          .from('medical_visits')
+          .update({
+            status: 'cancelled',
+            deleted_at: new Date().toISOString(),
+            deleted_by: authData.user?.id ?? null,
+          })
+          .eq('id', visit.id);
+
+        if (fallbackError) {
+          showAlert('No se pudo eliminar', fallbackError.message);
+          return;
+        }
+      }
+
+      await closePreview();
+      router.back();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Ocurrió un error inesperado.';
+      showAlert('No se pudo eliminar', message);
+    } finally {
+      setDeletingVisit(false);
+    }
   }
 
   if (loading) {
@@ -232,14 +420,27 @@ export default function VisitDetailRoute() {
             {visit.doctor_name ?? 'Sin médico'}
           </Text>
         </View>
-        <TouchableOpacity
-          style={styles.attachBtn}
-          onPress={handleAttach}
-          activeOpacity={0.8}
-        >
-          <Ionicons name="camera-outline" size={18} color={Colors.white} />
-          <Text style={styles.attachBtnText}>Adjuntar</Text>
-        </TouchableOpacity>
+        <View style={styles.headerActions}>
+          <TouchableOpacity
+            style={styles.deleteVisitBtn}
+            onPress={confirmDeleteVisit}
+            disabled={deletingVisit}
+            activeOpacity={0.8}
+          >
+            {deletingVisit
+              ? <ActivityIndicator color={Colors.alert} size="small" />
+              : <Ionicons name="trash-outline" size={18} color={Colors.alert} />
+            }
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.attachBtn}
+            onPress={handleAttach}
+            activeOpacity={0.8}
+          >
+            <Ionicons name="camera-outline" size={18} color={Colors.white} />
+            <Text style={styles.attachBtnText}>Adjuntar</Text>
+          </TouchableOpacity>
+        </View>
       </View>
 
       <ScrollView
@@ -332,40 +533,66 @@ export default function VisitDetailRoute() {
               {docs.map(doc => {
                 const st = STATUS_LABEL[doc.processing_status] ?? STATUS_LABEL.pending;
                 return (
-                  <TouchableOpacity
-                    key={doc.id}
-                    style={styles.docCard}
-                    activeOpacity={doc.file_path ? 0.8 : 1}
-                    onPress={() => { void openDocument(doc); }}
-                    disabled={!doc.file_path}
-                  >
-                    <View style={[styles.docIconWrap, { backgroundColor: Colors.primary + '18' }]}>
-                      <Ionicons name={getDocumentIcon(doc)} size={22} color={Colors.primary} />
-                    </View>
-                    <View style={styles.docInfo}>
-                      <Text style={styles.docType}>
-                        {getDocumentLabel(doc)}
-                      </Text>
-                      <Text style={styles.docDate}>
-                        {new Date(doc.created_at).toLocaleDateString('es-CO', {
-                          day: '2-digit', month: 'short', year: 'numeric',
-                        })}
-                      </Text>
-                    </View>
-                    {!!doc.file_path && (
-                      <TouchableOpacity style={styles.previewDocBtn} onPress={() => { void openDocument(doc); }}>
+                  <View key={doc.id} style={styles.docCard}>
+                    <TouchableOpacity
+                      style={styles.docMainPressable}
+                      onPress={() => { void openDocument(doc); }}
+                      disabled={!doc.file_path}
+                      activeOpacity={doc.file_path ? 0.8 : 1}
+                    >
+                      <View style={[styles.docIconWrap, { backgroundColor: Colors.primary + '18' }]}>
+                        <Ionicons name={getDocumentIcon(doc)} size={22} color={Colors.primary} />
+                      </View>
+                      <View style={styles.docInfo}>
+                        <Text style={styles.docType}>
+                          {getDocumentLabel(doc)}
+                        </Text>
+                        <Text style={styles.docDate}>
+                          {new Date(doc.created_at).toLocaleDateString('es-CO', {
+                            day: '2-digit', month: 'short', year: 'numeric',
+                          })}
+                        </Text>
+                      </View>
+                      <View style={[styles.statusBadge, { backgroundColor: st.color + '22' }]}>
+                        <Ionicons name={st.icon} size={12} color={st.color} />
+                        <Text style={[styles.statusText, { color: st.color }]}>{st.label}</Text>
+                      </View>
+                    </TouchableOpacity>
+
+                    <View style={styles.docActionsRow}>
+                      <TouchableOpacity
+                        style={[styles.docActionBtn, !doc.file_path && styles.docActionBtnDisabled]}
+                        onPress={() => { void openDocument(doc); }}
+                        disabled={!doc.file_path}
+                        activeOpacity={0.8}
+                      >
                         <Ionicons
                           name={isAudioDocument(doc) ? 'play-circle-outline' : 'expand-outline'}
-                          size={20}
-                          color={Colors.textSecondary}
+                          size={18}
+                          color={!doc.file_path ? Colors.textMuted : Colors.primary}
                         />
+                        <Text style={[styles.docActionText, !doc.file_path && styles.docActionTextDisabled]}>
+                          Abrir
+                        </Text>
                       </TouchableOpacity>
-                    )}
-                    <View style={[styles.statusBadge, { backgroundColor: st.color + '22' }]}>
-                      <Ionicons name={st.icon} size={12} color={st.color} />
-                      <Text style={[styles.statusText, { color: st.color }]}>{st.label}</Text>
+
+                      <TouchableOpacity
+                        style={[styles.docActionBtn, styles.docDeleteActionBtn]}
+                        onPress={() => confirmDeleteDocument(doc)}
+                        disabled={deletingDocId === doc.id}
+                        activeOpacity={0.8}
+                      >
+                        {deletingDocId === doc.id ? (
+                          <ActivityIndicator color={Colors.alert} size="small" />
+                        ) : (
+                          <>
+                            <Ionicons name="trash-outline" size={18} color={Colors.alert} />
+                            <Text style={styles.docDeleteActionText}>Eliminar</Text>
+                          </>
+                        )}
+                      </TouchableOpacity>
                     </View>
-                  </TouchableOpacity>
+                  </View>
                 );
               })}
             </View>
@@ -486,6 +713,12 @@ const styles = StyleSheet.create({
   headerCenter: { flex: 1, alignItems: 'center', gap: 2 },
   headerTitle:  { color: Colors.textPrimary,   fontSize: Typography.md, fontWeight: Typography.bold },
   headerSub:    { color: Colors.textSecondary, fontSize: Typography.xs },
+  headerActions: { flexDirection: 'row', alignItems: 'center', gap: Spacing.xs },
+  deleteVisitBtn: {
+    width: 38, height: 38, backgroundColor: Colors.alertBg,
+    borderRadius: Radius.md, alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1, borderColor: Colors.alert + '33',
+  },
   attachBtn: {
     flexDirection: 'row', alignItems: 'center', gap: 5,
     backgroundColor: Colors.primary, borderRadius: Radius.md,
@@ -545,16 +778,53 @@ const styles = StyleSheet.create({
 
   docsList: { gap: Spacing.sm },
   docCard: {
-    flexDirection: 'row', alignItems: 'center', gap: Spacing.md,
     backgroundColor: Colors.surface, borderRadius: Radius.lg,
     borderWidth: 1, borderColor: Colors.border,
-    paddingHorizontal: Spacing.md, paddingVertical: Spacing.md,
+    padding: Spacing.md,
+    gap: Spacing.sm,
   },
+  docMainPressable: { flexDirection: 'row', alignItems: 'center', gap: Spacing.md },
   docIconWrap: { width: 40, height: 40, borderRadius: Radius.md, alignItems: 'center', justifyContent: 'center' },
   docInfo:     { flex: 1, gap: 2 },
   docType:     { color: Colors.textPrimary,   fontSize: Typography.sm, fontWeight: Typography.medium },
   docDate:     { color: Colors.textSecondary, fontSize: Typography.xs },
-  previewDocBtn: { marginRight: Spacing.xs },
+  docActionsRow: {
+    flexDirection: 'row',
+    gap: Spacing.sm,
+  },
+  docActionBtn: {
+    flex: 1,
+    minHeight: 42,
+    borderRadius: Radius.md,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    backgroundColor: Colors.background,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexDirection: 'row',
+    gap: Spacing.xs,
+    paddingHorizontal: Spacing.md,
+  },
+  docActionBtnDisabled: {
+    opacity: 0.55,
+  },
+  docActionText: {
+    color: Colors.primary,
+    fontSize: Typography.sm,
+    fontWeight: Typography.semibold,
+  },
+  docActionTextDisabled: {
+    color: Colors.textMuted,
+  },
+  docDeleteActionBtn: {
+    backgroundColor: Colors.alertBg,
+    borderColor: Colors.alert + '22',
+  },
+  docDeleteActionText: {
+    color: Colors.alert,
+    fontSize: Typography.sm,
+    fontWeight: Typography.semibold,
+  },
   statusBadge: { flexDirection: 'row', alignItems: 'center', gap: 4, borderRadius: Radius.full, paddingHorizontal: Spacing.sm, paddingVertical: 4 },
   statusText:  { fontSize: Typography.xs, fontWeight: Typography.medium },
 

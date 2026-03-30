@@ -52,7 +52,7 @@ export default function MemberDetailRoute() {
       localMember
         ? Promise.resolve({ data: localMember, error: null })
         : supabase.from('family_members').select('*').eq('id', memberId).single(),
-      supabase.from('medical_visits').select('*').eq('family_member_id', memberId).eq('status', 'completed').order('visit_date', { ascending: false }).limit(5),
+      supabase.from('medical_visits').select('*').eq('family_member_id', memberId).eq('status', 'completed').is('deleted_at', null).order('visit_date', { ascending: false }).limit(5),
       supabase.from('prescriptions').select('*').eq('family_member_id', memberId).eq('status', 'active').order('created_at', { ascending: false }),
       supabase.from('medical_tests').select('*').eq('family_member_id', memberId).in('status', ['pending', 'scheduled']).order('due_at', { ascending: true }),
     ]);

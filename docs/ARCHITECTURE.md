@@ -4,13 +4,14 @@
 
 | Capa | Tecnología | Justificación |
 |------|-----------|---------------|
-| Mobile | React Native + Expo SDK 51 | Cross-platform iOS/Android, acceso nativo a cámara y notificaciones |
+| Mobile | React Native + Expo SDK 54 | Cross-platform iOS/Android, acceso nativo a cámara y notificaciones |
 | Backend | Supabase (BaaS) | Auth, DB, Storage, Edge Functions en un solo servicio |
 | Base de datos | PostgreSQL 15 (Supabase) | RDBMS robusto, RLS nativo, soporte JSONB para datos IA |
 | Storage | Supabase Storage | Almacenamiento de imágenes y documentos médicos |
 | Auth | Supabase Auth | JWT con RLS integrado, soporte OAuth |
 | Functions | Supabase Edge Functions (Deno) | Procesamiento IA, webhooks, lógica de negocio |
-| OCR + LLM | DeepSeek API | OCR integrado + LLM para estructurar fórmulas médicas |
+| OCR imágenes | OpenAI Vision | Extracción estructurada de fórmulas médicas desde imagen |
+| LLM texto | DeepSeek API | Expansión de búsqueda y estructuración de notas de voz |
 | Notificaciones | Expo Notifications + FCM | Push notifications locales y remotas |
 | Estado global | Zustand | Liviano, compatible con React Native |
 | HTTP Client | Supabase JS Client v2 | Realtime, auth automático, RLS transparente |
@@ -97,6 +98,32 @@ tenant (cuenta/organización)
 5. JWT del usuario incluye claims → RLS evalúa pertenencia al tenant
 6. Todas las queries filtran por tenant_id automáticamente via RLS
 ```
+
+---
+
+## Búsqueda Híbrida
+
+### Búsqueda global (`src/app/(app)/search.tsx`)
+- Primer intento: `searchGlobalFallback()` en cliente
+- Si no hay resultados: `search-ai`
+- Si la edge function falla: `search_global`
+
+### Búsqueda en historial (`src/app/(app)/history.tsx`)
+- Primer intento: `searchMemberHistoryLocal()` con datos ya cargados del miembro
+- Segundo intento: `search_medical_history`
+- Tercer intento: `search-ai` con `memberContext` y reintento de `search_medical_history`
+
+Esto reduce la dependencia de una sola capa y deja la UX más resiliente cuando una RPC o edge function falla.
+
+---
+
+## Política de Borrado Implementada
+
+- Las visitas usan soft delete con `deleted_at` y `deleted_by`.
+- Los adjuntos de una visita sí se pueden eliminar individualmente.
+- Si un adjunto ya originó medicamentos o exámenes confirmados, la RPC bloquea su borrado.
+- Las búsquedas y listados normales excluyen visitas soft-deleted.
+- No existe hard delete de visitas desde la app.
 
 ---
 

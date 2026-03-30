@@ -1,10 +1,17 @@
 -- ============================================================
--- 013 — search_global v2
--- Amplía la búsqueda para incluir:
---   1. voice_note_text en visitas (notas de voz)
---   2. institution_name en visitas
---   3. Contenido de documentos procesados (parsed_json de fotos)
---   4. Resultado de tipo 'document' para datos adjuntos
+-- 018 — search_global: buscar también por family_member tenant
+--
+-- Problema: prescriptions/tests creados con tenant_id incorrecto
+-- o NULL no aparecen en search_global (filtra por rx.tenant_id = v_tenant_id).
+-- Sin embargo sí aparecen en la pestaña de medicamentos porque
+-- esa query filtra por family_member_id.
+--
+-- Fix: agregar filtro OR usando el tenant de family_members como
+-- fuente de verdad secundaria, de modo que si el registro pertenece
+-- a un miembro del tenant se incluya aunque su propio tenant_id esté mal.
+--
+-- También aplica el mismo fix a los bloques de medical_tests,
+-- medical_visits y medical_documents.
 -- ============================================================
 
 CREATE OR REPLACE FUNCTION public.search_global(
@@ -36,7 +43,7 @@ BEGIN
 
   RETURN QUERY
 
-  -- 1. Miembros (por nombre)
+  -- 1. Miembros
   SELECT
     'member'::TEXT,
     'member'::TEXT,
@@ -49,13 +56,13 @@ BEGIN
   FROM family_members fm
   WHERE fm.tenant_id = v_tenant_id
     AND (
-      fm.first_name                    ILIKE v_pattern OR
-      COALESCE(fm.last_name, '')       ILIKE v_pattern
+      fm.first_name              ILIKE v_pattern OR
+      COALESCE(fm.last_name, '') ILIKE v_pattern
     )
 
   UNION ALL
 
-  -- 2. Medicamentos (recetas confirmadas)
+  -- 2. Medicamentos — usa tenant de family_member como fuente de verdad
   SELECT
     'medication'::TEXT,
     'medication'::TEXT,
@@ -71,7 +78,7 @@ BEGIN
     rx.start_at
   FROM prescriptions rx
   JOIN family_members fm ON fm.id = rx.family_member_id
-  WHERE rx.tenant_id = v_tenant_id
+  WHERE fm.tenant_id = v_tenant_id          -- fuente de verdad: tenant del miembro
     AND (
       rx.medication_name              ILIKE v_pattern OR
       COALESCE(rx.presentation,  '') ILIKE v_pattern OR
@@ -87,13 +94,12 @@ BEGIN
     mv.id,
     mv.family_member_id,
     trim(fm.first_name || ' ' || COALESCE(fm.last_name, '')),
-    COALESCE(mv.diagnosis, mv.reason_for_visit,
-             left(mv.voice_note_text, 80), ''),
+    COALESCE(mv.diagnosis, mv.reason_for_visit, left(mv.voice_note_text, 80), ''),
     COALESCE(mv.doctor_name, mv.institution_name, ''),
     mv.visit_date
   FROM medical_visits mv
   JOIN family_members fm ON fm.id = mv.family_member_id
-  WHERE mv.tenant_id = v_tenant_id
+  WHERE fm.tenant_id = v_tenant_id
     AND (
       COALESCE(mv.diagnosis,          '') ILIKE v_pattern OR
       COALESCE(mv.reason_for_visit,   '') ILIKE v_pattern OR
@@ -116,7 +122,7 @@ BEGIN
     mv.visit_date
   FROM medical_visits mv
   JOIN family_members fm ON fm.id = mv.family_member_id
-  WHERE mv.tenant_id = v_tenant_id
+  WHERE fm.tenant_id = v_tenant_id
     AND COALESCE(mv.doctor_name, '') ILIKE v_pattern
 
   UNION ALL
@@ -133,12 +139,12 @@ BEGIN
     mv.visit_date
   FROM medical_visits mv
   JOIN family_members fm ON fm.id = mv.family_member_id
-  WHERE mv.tenant_id = v_tenant_id
+  WHERE fm.tenant_id = v_tenant_id
     AND COALESCE(mv.specialty, '') ILIKE v_pattern
 
   UNION ALL
 
-  -- 6. Exámenes ordenados
+  -- 6. Exámenes
   SELECT
     'test'::TEXT,
     'test'::TEXT,
@@ -150,7 +156,7 @@ BEGIN
     mt.ordered_at
   FROM medical_tests mt
   JOIN family_members fm ON fm.id = mt.family_member_id
-  WHERE mt.tenant_id = v_tenant_id
+  WHERE fm.tenant_id = v_tenant_id          -- fuente de verdad: tenant del miembro
     AND (
       mt.test_name              ILIKE v_pattern OR
       COALESCE(mt.category, '') ILIKE v_pattern
@@ -158,8 +164,7 @@ BEGIN
 
   UNION ALL
 
-  -- 7. Documentos procesados (fotos, notas de voz) — busca en parsed_json
-  --    Solo documentos con contenido analizado por IA
+  -- 7. Documentos procesados (parsed_json de fotos)
   SELECT
     'document'::TEXT,
     'document'::TEXT,
@@ -179,7 +184,7 @@ BEGIN
   FROM medical_documents md
   JOIN family_members fm ON fm.id = md.family_member_id
   LEFT JOIN medical_visits mv ON mv.id = md.medical_visit_id
-  WHERE md.tenant_id = v_tenant_id
+  WHERE fm.tenant_id = v_tenant_id          -- fuente de verdad: tenant del miembro
     AND md.processing_status IN ('processed', 'verified')
     AND md.parsed_json IS NOT NULL
     AND md.parsed_json::TEXT ILIKE v_pattern

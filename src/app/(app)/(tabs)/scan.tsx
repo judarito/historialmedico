@@ -33,6 +33,14 @@ function todayISO(): string {
   return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}T${pad(now.getHours())}:${pad(now.getMinutes())}`;
 }
 
+function toDateOnly(iso: string): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
 function formatDate(isoDate?: string | null): string {
   if (!isoDate) return '';
   const d = new Date(isoDate);
@@ -43,10 +51,9 @@ async function invokeProcessPrescription(documentId: string): Promise<{
   manualEntryRequired: boolean;
   processingError: string;
 }> {
-  const { data: sessionData, error: sessionError } = await supabase.auth.refreshSession();
-  const accessToken = sessionData.session?.access_token;
-
-  if (sessionError || !accessToken) {
+  // Refrescar sesión para garantizar token válido, el SDK lo usa automáticamente
+  const { error: sessionError } = await supabase.auth.refreshSession();
+  if (sessionError) {
     return {
       manualEntryRequired: true,
       processingError: 'No se pudo refrescar la sesion. Cierra sesion e inicia de nuevo.',
@@ -55,9 +62,6 @@ async function invokeProcessPrescription(documentId: string): Promise<{
 
   const { data, error } = await supabase.functions.invoke('process-prescription', {
     body: { document_id: documentId },
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-    },
   });
 
   if (error) {
@@ -110,16 +114,35 @@ export default function ScanTab() {
   const [newVisitDoctor,  setNewVisitDoctor]  = useState('');
   const [savingVisit,     setSavingVisit]     = useState(false);
 
+  // Fecha del documento (default: fecha de la visita, editable)
+  const [capturedAt, setCapturedAt] = useState(todayISO());
+
   // Foto
   const [image,     setImage]     = useState<{ uri: string } | null>(null);
   const [uploading, setUploading] = useState(false);
 
   // Voz
-  const [voiceLoading,    setVoiceLoading]    = useState(false);
-  const [voiceTranscript, setVoiceTranscript] = useState('');
-  const [voiceStructured, setVoiceStructured] = useState<any>(null);
-  const [voiceAudioUri,   setVoiceAudioUri]   = useState<string | null>(null);
-  const [savingVoice,     setSavingVoice]     = useState(false);
+  const [voiceLoading,       setVoiceLoading]       = useState(false);
+  const [voiceTranscript,    setVoiceTranscript]    = useState('');
+  const [voiceStructured,    setVoiceStructured]    = useState<any>(null);
+  const [voiceAudioUri,      setVoiceAudioUri]      = useState<string | null>(null);
+  const [voiceDetectedDate,  setVoiceDetectedDate]  = useState<string | null>(null);
+  const [savingVoice,        setSavingVoice]        = useState(false);
+
+  // Cuando se selecciona una visita, proponer su fecha como fecha del documento
+  useEffect(() => {
+    if (selectedVisit?.visit_date) {
+      const vd = new Date(selectedVisit.visit_date);
+      if (!isNaN(vd.getTime())) {
+        const pad = (n: number) => String(n).padStart(2, '0');
+        setCapturedAt(
+          `${vd.getFullYear()}-${pad(vd.getMonth() + 1)}-${pad(vd.getDate())}T${pad(vd.getHours())}:${pad(vd.getMinutes())}`
+        );
+        return;
+      }
+    }
+    setCapturedAt(todayISO());
+  }, [selectedVisit]);
 
   useEffect(() => {
     fetchMembers().then(async () => {
@@ -134,6 +157,7 @@ export default function ScanTab() {
             .from('medical_visits')
             .select('*')
             .eq('id', preselectedVisitId)
+            .is('deleted_at', null)
             .single();
           if (data) { setSelectedVisit(data as MedicalVisit); setStep('capture'); return; }
         }
@@ -159,6 +183,7 @@ export default function ScanTab() {
       .from('medical_visits')
       .select('id, visit_date, doctor_name, specialty, institution_name')
       .eq('family_member_id', id)
+      .is('deleted_at', null)
       .order('visit_date', { ascending: false })
       .limit(10);
     setVisits((data as MedicalVisit[]) ?? []);
@@ -225,11 +250,11 @@ export default function ScanTab() {
           family_member_id:  selectedMember.id,
           medical_visit_id:  selectedVisit.id,
           document_type:     'formula',
-          title:             `Formula ${new Date().toLocaleDateString('es-CO')}`,
+          title:             `Formula ${new Date(capturedAt).toLocaleDateString('es-CO')}`,
           file_path:         filePath,
           mime_type:         'image/jpeg',
           file_size_bytes:   arrayBuffer.byteLength,
-          captured_at:       new Date().toISOString(),
+          captured_at:       new Date(capturedAt).toISOString(),
           processing_status: 'pending',
           verified_by_user:  false,
           created_by:        user.id,
@@ -272,8 +297,20 @@ export default function ScanTab() {
         return;
       }
       setVoiceTranscript(transcription);
-      setVoiceStructured(data.structured ?? null);
+      const structured = data.structured ?? null;
+      setVoiceStructured(structured);
       setVoiceAudioUri(audioUri);
+
+      // Detectar si la IA extrajo una fecha distinta a la de la visita
+      const aiDate = structured?.visit_date as string | null | undefined;
+      if (aiDate) {
+        const aiDateOnly    = toDateOnly(aiDate);
+        const visitDateOnly = toDateOnly(selectedVisit?.visit_date ?? '');
+        setVoiceDetectedDate(aiDateOnly && aiDateOnly !== visitDateOnly ? aiDate : null);
+      } else {
+        setVoiceDetectedDate(null);
+      }
+
       setStep('voice_confirm');
     } catch {
       Alert.alert('Error', 'No se pudo procesar la nota de voz.');
@@ -311,10 +348,14 @@ export default function ScanTab() {
         if (audioUploadErr) throw new Error(audioUploadErr.message);
       }
 
-      // Actualizar la visita con la transcripción y datos estructurados
+      // Actualizar la visita con la transcripción, datos estructurados y fecha si fue detectada
       const s = voiceStructured;
+      const visitUpdateDate = voiceDetectedDate
+        ? new Date(voiceDetectedDate).toISOString()
+        : undefined;
       await supabase.from('medical_visits').update({
         voice_note_text:  voiceTranscript,
+        ...(visitUpdateDate              && { visit_date:       visitUpdateDate      }),
         ...(s?.doctor_name      && { doctor_name:      s.doctor_name      }),
         ...(s?.specialty        && { specialty:        s.specialty        }),
         ...(s?.institution_name && { institution_name: s.institution_name }),
@@ -362,9 +403,11 @@ export default function ScanTab() {
     setShowNewVisit(false);
     setNewVisitDoctor('');
     setNewVisitDate(todayISO());
+    setCapturedAt(todayISO());
     setVoiceTranscript('');
     setVoiceStructured(null);
     setVoiceAudioUri(null);
+    setVoiceDetectedDate(null);
   }
 
   // ── Step: member ────────────────────────────────────────────────────────────
@@ -591,6 +634,17 @@ export default function ScanTab() {
             </View>
           </View>
 
+          {/* Fecha del documento (visible cuando hay imagen) */}
+          {image && (
+            <DatePickerField
+              label="Fecha del documento"
+              value={capturedAt}
+              onChange={setCapturedAt}
+              withTime
+              maximumDate={new Date()}
+            />
+          )}
+
           {/* Botón analizar foto */}
           {image && (
             <TouchableOpacity
@@ -665,6 +719,22 @@ export default function ScanTab() {
             </View>
             <Text style={styles.transcriptText}>{voiceTranscript}</Text>
           </View>
+
+          {/* Fecha detectada por IA — distinta a la de la visita */}
+          {!!voiceDetectedDate && (
+            <View style={[styles.transcriptBox, { borderColor: Colors.info + '44', backgroundColor: Colors.infoBg }]}>
+              <View style={styles.transcriptHeader}>
+                <Ionicons name="calendar-outline" size={14} color={Colors.info} />
+                <Text style={[styles.transcriptLabel, { color: Colors.info }]}>Fecha detectada en la consulta</Text>
+              </View>
+              <Text style={styles.transcriptText}>
+                {new Date(voiceDetectedDate).toLocaleDateString('es-CO', { weekday: 'long', day: '2-digit', month: 'long', year: 'numeric' })}
+              </Text>
+              <Text style={[styles.transcriptText, { fontSize: 12, color: Colors.textMuted, marginTop: 4 }]}>
+                La visita se registrará con esta fecha.
+              </Text>
+            </View>
+          )}
 
           {/* Datos extraídos */}
           {fields.length > 0 && (
