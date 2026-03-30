@@ -8,9 +8,13 @@ import {
   TouchableOpacity,
   ActivityIndicator,
   RefreshControl,
+  Modal,
+  Image,
+  Alert,
 } from 'react-native';
 import { useLocalSearchParams, router, useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
+import { Audio } from 'expo-av';
 import { supabase } from '../../../services/supabase';
 import { Colors, Typography, Spacing, Radius, Shadow } from '../../../theme';
 import type { Database } from '../../../types/database.types';
@@ -31,8 +35,37 @@ const DOC_TYPE_LABEL: Record<string, string> = {
   lab_result:   'Resultado de laboratorio',
   imaging:      'Imagen diagnóstica',
   prescription: 'Receta',
+  voice_note:   'Nota de voz',
   other:        'Documento',
 };
+
+const IMAGE_EXT_RE = /\.(jpg|jpeg|png|heic|webp)$/i;
+const AUDIO_EXT_RE = /\.(m4a|mp3|aac|wav|ogg|webm)$/i;
+
+function isImageDocument(doc: MedicalDocument): boolean {
+  return Boolean(doc.mime_type?.startsWith('image/')) || IMAGE_EXT_RE.test(doc.file_path ?? '');
+}
+
+function isAudioDocument(doc: MedicalDocument): boolean {
+  return Boolean(doc.mime_type?.startsWith('audio/')) || AUDIO_EXT_RE.test(doc.file_path ?? '');
+}
+
+function getDocumentLabel(doc: MedicalDocument): string {
+  return doc.title || DOC_TYPE_LABEL[doc.document_type ?? ''] || 'Documento';
+}
+
+function getDocumentIcon(doc: MedicalDocument): keyof typeof Ionicons.glyphMap {
+  if (isAudioDocument(doc)) return 'mic-outline';
+  if (isImageDocument(doc)) return 'image-outline';
+  return 'document-attach-outline';
+}
+
+function formatAudioTime(ms: number): string {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${String(seconds).padStart(2, '0')}`;
+}
 
 export default function VisitDetailRoute() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -41,9 +74,24 @@ export default function VisitDetailRoute() {
   const [docs,      setDocs]      = useState<MedicalDocument[]>([]);
   const [loading,   setLoading]   = useState(true);
   const [refreshing,setRefreshing]= useState(false);
+  const [previewDoc, setPreviewDoc] = useState<MedicalDocument | null>(null);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [audioSound, setAudioSound] = useState<Audio.Sound | null>(null);
+  const [audioPlaying, setAudioPlaying] = useState(false);
+  const [audioPositionMillis, setAudioPositionMillis] = useState(0);
+  const [audioDurationMillis, setAudioDurationMillis] = useState(0);
 
   // Recargar al volver del scan (después de adjuntar un documento)
   useFocusEffect(useCallback(() => { load(); }, [id]));
+
+  useEffect(() => {
+    return () => {
+      if (audioSound) {
+        audioSound.unloadAsync().catch(() => {});
+      }
+    };
+  }, [audioSound]);
 
   async function load() {
     if (!id) return;
@@ -70,6 +118,75 @@ export default function VisitDetailRoute() {
         visitId:  visit.id,
       },
     });
+  }
+
+  async function releaseAudioPlayer() {
+    if (!audioSound) return;
+    await audioSound.unloadAsync().catch(() => {});
+    setAudioSound(null);
+    setAudioPlaying(false);
+    setAudioPositionMillis(0);
+    setAudioDurationMillis(0);
+  }
+
+  async function openDocument(doc: MedicalDocument) {
+    if (!doc.file_path) {
+      Alert.alert('Sin archivo original', 'Este adjunto no tiene archivo original disponible.');
+      return;
+    }
+
+    setPreviewDoc(doc);
+    setPreviewLoading(true);
+    setPreviewUrl(null);
+    await releaseAudioPlayer();
+
+    const { data, error } = await supabase.storage
+      .from('medical-documents')
+      .createSignedUrl(doc.file_path, 3600);
+
+    if (error || !data?.signedUrl) {
+      setPreviewLoading(false);
+      setPreviewDoc(null);
+      Alert.alert('Error', error?.message ?? 'No se pudo abrir el adjunto original.');
+      return;
+    }
+
+    setPreviewUrl(data.signedUrl);
+
+    if (isAudioDocument(doc)) {
+      await Audio.setAudioModeAsync({ playsInSilentModeIOS: true }).catch(() => {});
+      const { sound } = await Audio.Sound.createAsync(
+        { uri: data.signedUrl },
+        { shouldPlay: false },
+        (status) => {
+          if (!status.isLoaded) return;
+          setAudioPlaying(status.isPlaying);
+          setAudioPositionMillis(status.positionMillis ?? 0);
+          setAudioDurationMillis(status.durationMillis ?? 0);
+        }
+      );
+      setAudioSound(sound);
+    }
+
+    setPreviewLoading(false);
+  }
+
+  async function closePreview() {
+    await releaseAudioPlayer();
+    setPreviewDoc(null);
+    setPreviewUrl(null);
+    setPreviewLoading(false);
+  }
+
+  async function toggleAudioPlayback() {
+    if (!audioSound) return;
+    const status = await audioSound.getStatusAsync();
+    if (!status.isLoaded) return;
+    if (status.isPlaying) {
+      await audioSound.pauseAsync();
+      return;
+    }
+    await audioSound.playAsync();
   }
 
   if (loading) {
@@ -215,13 +332,19 @@ export default function VisitDetailRoute() {
               {docs.map(doc => {
                 const st = STATUS_LABEL[doc.processing_status] ?? STATUS_LABEL.pending;
                 return (
-                  <View key={doc.id} style={styles.docCard}>
+                  <TouchableOpacity
+                    key={doc.id}
+                    style={styles.docCard}
+                    activeOpacity={doc.file_path ? 0.8 : 1}
+                    onPress={() => { void openDocument(doc); }}
+                    disabled={!doc.file_path}
+                  >
                     <View style={[styles.docIconWrap, { backgroundColor: Colors.primary + '18' }]}>
-                      <Ionicons name="document-attach-outline" size={22} color={Colors.primary} />
+                      <Ionicons name={getDocumentIcon(doc)} size={22} color={Colors.primary} />
                     </View>
                     <View style={styles.docInfo}>
                       <Text style={styles.docType}>
-                        {DOC_TYPE_LABEL[doc.document_type ?? ''] ?? 'Documento'}
+                        {getDocumentLabel(doc)}
                       </Text>
                       <Text style={styles.docDate}>
                         {new Date(doc.created_at).toLocaleDateString('es-CO', {
@@ -229,11 +352,20 @@ export default function VisitDetailRoute() {
                         })}
                       </Text>
                     </View>
+                    {!!doc.file_path && (
+                      <TouchableOpacity style={styles.previewDocBtn} onPress={() => { void openDocument(doc); }}>
+                        <Ionicons
+                          name={isAudioDocument(doc) ? 'play-circle-outline' : 'expand-outline'}
+                          size={20}
+                          color={Colors.textSecondary}
+                        />
+                      </TouchableOpacity>
+                    )}
                     <View style={[styles.statusBadge, { backgroundColor: st.color + '22' }]}>
                       <Ionicons name={st.icon} size={12} color={st.color} />
                       <Text style={[styles.statusText, { color: st.color }]}>{st.label}</Text>
                     </View>
-                  </View>
+                  </TouchableOpacity>
                 );
               })}
             </View>
@@ -242,6 +374,63 @@ export default function VisitDetailRoute() {
 
         <View style={{ height: Spacing.xxxl }} />
       </ScrollView>
+
+      <Modal
+        visible={!!previewDoc}
+        animationType="slide"
+        transparent
+        onRequestClose={() => { void closePreview(); }}
+      >
+        <View style={styles.previewOverlay}>
+          <View style={styles.previewSheet}>
+            <View style={styles.previewHeader}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.previewTitle}>{previewDoc ? getDocumentLabel(previewDoc) : 'Adjunto'}</Text>
+                <Text style={styles.previewSubtitle}>Archivo original</Text>
+              </View>
+              <TouchableOpacity style={styles.backBtn} onPress={() => { void closePreview(); }}>
+                <Ionicons name="close" size={22} color={Colors.textPrimary} />
+              </TouchableOpacity>
+            </View>
+
+            {previewLoading ? (
+              <View style={styles.previewBodyCenter}>
+                <ActivityIndicator color={Colors.primary} size="large" />
+              </View>
+            ) : previewDoc && previewUrl && isImageDocument(previewDoc) ? (
+              <View style={styles.previewBody}>
+                <Image source={{ uri: previewUrl }} style={styles.previewImage} resizeMode="contain" />
+              </View>
+            ) : previewDoc && previewUrl && isAudioDocument(previewDoc) ? (
+              <View style={styles.previewBodyCenter}>
+                <View style={styles.audioCard}>
+                  <View style={styles.audioIconWrap}>
+                    <Ionicons name="mic" size={28} color={Colors.primary} />
+                  </View>
+                  <Text style={styles.audioTitle}>Nota de voz original</Text>
+                  <Text style={styles.audioMeta}>
+                    {formatAudioTime(audioPositionMillis)} / {formatAudioTime(audioDurationMillis)}
+                  </Text>
+                  <TouchableOpacity style={styles.audioPlayBtn} onPress={() => { void toggleAudioPlayback(); }}>
+                    <Ionicons name={audioPlaying ? 'pause' : 'play'} size={24} color={Colors.white} />
+                    <Text style={styles.audioPlayText}>{audioPlaying ? 'Pausar' : 'Reproducir'}</Text>
+                  </TouchableOpacity>
+                  {!!previewDoc.extracted_text && (
+                    <View style={styles.audioTranscriptBox}>
+                      <Text style={styles.audioTranscriptLabel}>Transcripción</Text>
+                      <Text style={styles.audioTranscriptText}>{previewDoc.extracted_text}</Text>
+                    </View>
+                  )}
+                </View>
+              </View>
+            ) : (
+              <View style={styles.previewBodyCenter}>
+                <Text style={styles.emptyText}>No se pudo previsualizar este adjunto.</Text>
+              </View>
+            )}
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -365,9 +554,104 @@ const styles = StyleSheet.create({
   docInfo:     { flex: 1, gap: 2 },
   docType:     { color: Colors.textPrimary,   fontSize: Typography.sm, fontWeight: Typography.medium },
   docDate:     { color: Colors.textSecondary, fontSize: Typography.xs },
+  previewDocBtn: { marginRight: Spacing.xs },
   statusBadge: { flexDirection: 'row', alignItems: 'center', gap: 4, borderRadius: Radius.full, paddingHorizontal: Spacing.sm, paddingVertical: 4 },
   statusText:  { fontSize: Typography.xs, fontWeight: Typography.medium },
 
   emptyCenter: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   emptyText:   { color: Colors.textMuted, fontSize: Typography.base },
+
+  previewOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(5, 15, 32, 0.78)',
+    justifyContent: 'flex-end',
+  },
+  previewSheet: {
+    backgroundColor: Colors.background,
+    borderTopLeftRadius: Radius.xl,
+    borderTopRightRadius: Radius.xl,
+    minHeight: '72%',
+    maxHeight: '92%',
+    paddingHorizontal: Spacing.base,
+    paddingTop: Spacing.base,
+    paddingBottom: Spacing.xl,
+  },
+  previewHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.md,
+    marginBottom: Spacing.base,
+  },
+  previewTitle: { color: Colors.textPrimary, fontSize: Typography.lg, fontWeight: Typography.bold },
+  previewSubtitle: { color: Colors.textSecondary, fontSize: Typography.sm, marginTop: 2 },
+  previewBody: {
+    flex: 1,
+    backgroundColor: Colors.surface,
+    borderRadius: Radius.xl,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    overflow: 'hidden',
+  },
+  previewBodyCenter: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: Spacing.xl,
+  },
+  previewImage: {
+    width: '100%',
+    height: '100%',
+    minHeight: 420,
+    backgroundColor: Colors.surface,
+  },
+  audioCard: {
+    width: '100%',
+    backgroundColor: Colors.surface,
+    borderRadius: Radius.xl,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    padding: Spacing.lg,
+    alignItems: 'center',
+    gap: Spacing.md,
+  },
+  audioIconWrap: {
+    width: 72,
+    height: 72,
+    borderRadius: 36,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: Colors.primary + '1F',
+  },
+  audioTitle: { color: Colors.textPrimary, fontSize: Typography.base, fontWeight: Typography.semibold },
+  audioMeta: { color: Colors.textSecondary, fontSize: Typography.sm },
+  audioPlayBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.sm,
+    backgroundColor: Colors.primary,
+    borderRadius: Radius.full,
+    paddingHorizontal: Spacing.lg,
+    height: 48,
+  },
+  audioPlayText: { color: Colors.white, fontSize: Typography.base, fontWeight: Typography.semibold },
+  audioTranscriptBox: {
+    width: '100%',
+    backgroundColor: Colors.background,
+    borderRadius: Radius.lg,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    padding: Spacing.md,
+    gap: Spacing.xs,
+  },
+  audioTranscriptLabel: {
+    color: Colors.textMuted,
+    fontSize: Typography.xs,
+    fontWeight: Typography.semibold,
+    textTransform: 'uppercase',
+  },
+  audioTranscriptText: {
+    color: Colors.textPrimary,
+    fontSize: Typography.sm,
+    lineHeight: 20,
+  },
 });

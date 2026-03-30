@@ -1,11 +1,21 @@
 import { useEffect } from 'react';
-import { View, ActivityIndicator } from 'react-native';
+import { View, ActivityIndicator, Text, ErrorUtils } from 'react-native';
 import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { useAuthStore } from '../store/authStore';
 import { NotificationService } from '../services/notifications';
 import { Colors } from '../theme';
+import { ErrorBoundary } from '../components/ErrorBoundary';
+
+// Captura errores JS no capturados (p.ej. promesas sin catch en release)
+if (ErrorUtils) {
+  const prev = ErrorUtils.getGlobalHandler();
+  ErrorUtils.setGlobalHandler((error, isFatal) => {
+    console.error(`[GlobalError] isFatal=${isFatal}`, error);
+    prev(error, isFatal);
+  });
+}
 
 export default function RootLayout() {
   const { init, initialized, session } = useAuthStore();
@@ -30,15 +40,17 @@ export default function RootLayout() {
   }
 
   return (
-    <SafeAreaProvider>
-      <StatusBar style="light" backgroundColor={Colors.background} />
-      <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: Colors.background } }}>
-        <Stack.Screen name="index" />
-        <Stack.Screen name="login" />
-        <Stack.Screen name="register" />
-        <Stack.Screen name="onboarding" />
-        <Stack.Screen name="(app)" />
-      </Stack>
-    </SafeAreaProvider>
+    <ErrorBoundary>
+      <SafeAreaProvider>
+        <StatusBar style="light" backgroundColor={Colors.background} />
+        <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: Colors.background } }}>
+          <Stack.Screen name="index" />
+          <Stack.Screen name="login" />
+          <Stack.Screen name="register" />
+          <Stack.Screen name="onboarding" />
+          <Stack.Screen name="(app)" />
+        </Stack>
+      </SafeAreaProvider>
+    </ErrorBoundary>
   );
 }

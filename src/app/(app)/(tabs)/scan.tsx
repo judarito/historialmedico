@@ -14,16 +14,18 @@ import {
 import * as ImagePicker from 'expo-image-picker';
 import { router, useLocalSearchParams } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
+import { FunctionsHttpError, FunctionsRelayError } from '@supabase/supabase-js';
 import { supabase } from '../../../services/supabase';
 import { useFamilyStore } from '../../../store/familyStore';
 import { useAuthStore } from '../../../store/authStore';
 import { Colors, Typography, Spacing, Radius } from '../../../theme';
 import { DatePickerField } from '../../../components/ui/DatePickerField';
+import { VoiceRecordButton, type VoiceCapturePayload } from '../../../components/ui/VoiceRecordButton';
 import type { Database } from '../../../types/database.types';
 
 type FamilyMember = Database['public']['Tables']['family_members']['Row'];
 type MedicalVisit = Database['public']['Tables']['medical_visits']['Row'];
-type Step = 'member' | 'visit' | 'photo';
+type Step = 'member' | 'visit' | 'capture' | 'voice_confirm';
 
 function todayISO(): string {
   const now = new Date();
@@ -35,6 +37,57 @@ function formatDate(isoDate?: string | null): string {
   if (!isoDate) return '';
   const d = new Date(isoDate);
   return d.toLocaleDateString('es-CO', { day: '2-digit', month: 'short', year: 'numeric' });
+}
+
+async function invokeProcessPrescription(documentId: string): Promise<{
+  manualEntryRequired: boolean;
+  processingError: string;
+}> {
+  const { data: sessionData, error: sessionError } = await supabase.auth.refreshSession();
+  const accessToken = sessionData.session?.access_token;
+
+  if (sessionError || !accessToken) {
+    return {
+      manualEntryRequired: true,
+      processingError: 'No se pudo refrescar la sesion. Cierra sesion e inicia de nuevo.',
+    };
+  }
+
+  const { data, error } = await supabase.functions.invoke('process-prescription', {
+    body: { document_id: documentId },
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+
+  if (error) {
+    let processingError = error.message || 'No se pudo extraer informacion automaticamente de la foto.';
+
+    if (error instanceof FunctionsHttpError || error instanceof FunctionsRelayError) {
+      const rawText = await error.context.text().catch(() => '');
+      if (rawText) {
+        try {
+          const payload = JSON.parse(rawText);
+          processingError =
+            payload?.error ||
+            payload?.message ||
+            rawText;
+        } catch {
+          processingError = rawText;
+        }
+      }
+    }
+
+    return {
+      manualEntryRequired: true,
+      processingError,
+    };
+  }
+
+  return {
+    manualEntryRequired: Boolean((data as any)?.manual_entry_required),
+    processingError: (data as any)?.error || '',
+  };
 }
 
 export default function ScanTab() {
@@ -61,6 +114,13 @@ export default function ScanTab() {
   const [image,     setImage]     = useState<{ uri: string } | null>(null);
   const [uploading, setUploading] = useState(false);
 
+  // Voz
+  const [voiceLoading,    setVoiceLoading]    = useState(false);
+  const [voiceTranscript, setVoiceTranscript] = useState('');
+  const [voiceStructured, setVoiceStructured] = useState<any>(null);
+  const [voiceAudioUri,   setVoiceAudioUri]   = useState<string | null>(null);
+  const [savingVoice,     setSavingVoice]     = useState(false);
+
   useEffect(() => {
     fetchMembers().then(async () => {
       const ms = useFamilyStore.getState().members;
@@ -75,7 +135,7 @@ export default function ScanTab() {
             .select('*')
             .eq('id', preselectedVisitId)
             .single();
-          if (data) { setSelectedVisit(data as MedicalVisit); setStep('photo'); return; }
+          if (data) { setSelectedVisit(data as MedicalVisit); setStep('capture'); return; }
         }
       }
 
@@ -125,7 +185,7 @@ export default function ScanTab() {
     if (error) { Alert.alert('Error', error.message); return; }
     setSelectedVisit(data as MedicalVisit);
     setShowNewVisit(false);
-    setStep('photo');
+    setStep('capture');
   }
 
   async function pickImage(fromCamera: boolean) {
@@ -165,7 +225,11 @@ export default function ScanTab() {
           family_member_id:  selectedMember.id,
           medical_visit_id:  selectedVisit.id,
           document_type:     'formula',
+          title:             `Formula ${new Date().toLocaleDateString('es-CO')}`,
           file_path:         filePath,
+          mime_type:         'image/jpeg',
+          file_size_bytes:   arrayBuffer.byteLength,
+          captured_at:       new Date().toISOString(),
           processing_status: 'pending',
           verified_by_user:  false,
           created_by:        user.id,
@@ -174,10 +238,7 @@ export default function ScanTab() {
         .single();
       if (docErr) throw new Error(docErr.message);
 
-      const { error: fnErr } = await supabase.functions.invoke('process-prescription', {
-        body: { document_id: doc.id },
-      });
-      if (fnErr) console.warn('Edge function error:', fnErr.message);
+      const { manualEntryRequired, processingError } = await invokeProcessPrescription(doc.id);
 
       setUploading(false);
       setImage(null);
@@ -189,11 +250,106 @@ export default function ScanTab() {
           visitId:     selectedVisit.id,
           visitDate:   selectedVisit.visit_date,
           doctorName:  selectedVisit.doctor_name ?? '',
+          manual:      manualEntryRequired ? '1' : '0',
+          processingError: manualEntryRequired ? processingError : '',
         },
       });
     } catch (err: any) {
       setUploading(false);
       Alert.alert('Error al subir', err.message ?? 'Intenta de nuevo');
+    }
+  }
+
+  async function handleVoiceCapture({ transcription, audioUri }: VoiceCapturePayload) {
+    if (!transcription.trim()) return;
+    setVoiceLoading(true);
+    try {
+      const { data, error } = await supabase.functions.invoke('voice-to-data', {
+        body: { transcription, context: 'visit' },
+      });
+      if (error || !data) {
+        Alert.alert('Error', 'No se pudo procesar la nota de voz.');
+        return;
+      }
+      setVoiceTranscript(transcription);
+      setVoiceStructured(data.structured ?? null);
+      setVoiceAudioUri(audioUri);
+      setStep('voice_confirm');
+    } catch {
+      Alert.alert('Error', 'No se pudo procesar la nota de voz.');
+    } finally {
+      setVoiceLoading(false);
+    }
+  }
+
+  async function handleSaveVoice() {
+    if (!selectedVisit || !selectedMember || !tenant || !family || !user) return;
+    setSavingVoice(true);
+    try {
+      const recordedAt = new Date().toISOString();
+      let audioFilePath = '';
+      let audioMimeType: string | null = null;
+      let audioSizeBytes: number | null = null;
+
+      if (voiceAudioUri) {
+        const extensionMatch = voiceAudioUri.split('?')[0].match(/\.([a-zA-Z0-9]+)$/);
+        const extension = (extensionMatch?.[1] ?? 'm4a').toLowerCase();
+        audioMimeType = extension === 'webm' ? 'audio/webm' : 'audio/mp4';
+        audioFilePath = `${tenant.id}/${family.id}/${selectedMember.id}/voice-${Date.now()}.${extension}`;
+
+        const response = await fetch(voiceAudioUri);
+        const arrayBuffer = await response.arrayBuffer();
+        audioSizeBytes = arrayBuffer.byteLength;
+
+        const { error: audioUploadErr } = await supabase.storage
+          .from('medical-documents')
+          .upload(audioFilePath, new Uint8Array(arrayBuffer), {
+            contentType: audioMimeType,
+            upsert: false,
+          });
+
+        if (audioUploadErr) throw new Error(audioUploadErr.message);
+      }
+
+      // Actualizar la visita con la transcripción y datos estructurados
+      const s = voiceStructured;
+      await supabase.from('medical_visits').update({
+        voice_note_text:  voiceTranscript,
+        ...(s?.doctor_name      && { doctor_name:      s.doctor_name      }),
+        ...(s?.specialty        && { specialty:        s.specialty        }),
+        ...(s?.institution_name && { institution_name: s.institution_name }),
+        ...(s?.reason_for_visit && { reason_for_visit: s.reason_for_visit }),
+        ...(s?.diagnosis        && { diagnosis:        s.diagnosis        }),
+        ...(s?.notes            && { notes:            s.notes            }),
+      }).eq('id', selectedVisit.id);
+
+      // Crear documento de tipo nota de voz
+      await supabase.from('medical_documents').insert({
+        tenant_id:         tenant.id,
+        family_id:         family.id,
+        family_member_id:  selectedMember.id,
+        medical_visit_id:  selectedVisit.id,
+        document_type:     'voice_note',
+        title:             `Nota de voz ${new Date().toLocaleDateString('es-CO')}`,
+        file_path:         audioFilePath,
+        mime_type:         audioMimeType,
+        file_size_bytes:   audioSizeBytes,
+        captured_at:       recordedAt,
+        extracted_text:    voiceTranscript,
+        parsed_json:       voiceStructured ?? null,
+        ai_model:          'deepseek-chat',
+        processing_status: 'processed',
+        verified_by_user:  true,
+        created_by:        user.id,
+      });
+
+      Alert.alert('¡Guardado!', 'La nota de voz fue vinculada a la visita.', [
+        { text: 'OK', onPress: () => reset() },
+      ]);
+    } catch (err: any) {
+      Alert.alert('Error', err.message ?? 'Intenta de nuevo');
+    } finally {
+      setSavingVoice(false);
     }
   }
 
@@ -206,6 +362,9 @@ export default function ScanTab() {
     setShowNewVisit(false);
     setNewVisitDoctor('');
     setNewVisitDate(todayISO());
+    setVoiceTranscript('');
+    setVoiceStructured(null);
+    setVoiceAudioUri(null);
   }
 
   // ── Step: member ────────────────────────────────────────────────────────────
@@ -352,7 +511,7 @@ export default function ScanTab() {
           ) : null}
 
           {selectedVisit && !showNewVisit && (
-            <TouchableOpacity style={styles.primaryBtn} onPress={() => setStep('photo')}>
+            <TouchableOpacity style={styles.primaryBtn} onPress={() => setStep('capture')}>
               <Text style={styles.primaryBtnText}>Continuar</Text>
               <Ionicons name="arrow-forward" size={20} color={Colors.white} />
             </TouchableOpacity>
@@ -362,84 +521,202 @@ export default function ScanTab() {
     );
   }
 
-  // ── Step: photo ─────────────────────────────────────────────────────────────
-  return (
-    <SafeAreaView style={styles.safe}>
-      <View style={styles.stepHeader}>
-        <TouchableOpacity onPress={() => { setStep('visit'); setImage(null); }} style={styles.backBtn}>
-          <Ionicons name="arrow-back" size={22} color={Colors.textPrimary} />
-        </TouchableOpacity>
-        <View style={{ flex: 1 }}>
-          <Text style={styles.stepHeaderTitle}>Tomar foto</Text>
-          <Text style={styles.stepHeaderSub}>
-            {selectedMember?.first_name} · {formatDate(selectedVisit?.visit_date)}
-          </Text>
+  // ── Step: capture ───────────────────────────────────────────────────────────
+  if (step === 'capture') {
+    return (
+      <SafeAreaView style={styles.safe}>
+        <View style={styles.stepHeader}>
+          <TouchableOpacity onPress={() => { setStep('visit'); setImage(null); }} style={styles.backBtn}>
+            <Ionicons name="arrow-back" size={22} color={Colors.textPrimary} />
+          </TouchableOpacity>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.stepHeaderTitle}>Adjuntar evidencia</Text>
+            <Text style={styles.stepHeaderSub}>
+              {selectedMember?.first_name} · {formatDate(selectedVisit?.visit_date)}
+            </Text>
+          </View>
+          <TouchableOpacity onPress={reset} style={styles.backBtn}>
+            <Ionicons name="close" size={22} color={Colors.textMuted} />
+          </TouchableOpacity>
         </View>
-        <TouchableOpacity onPress={reset} style={styles.backBtn}>
-          <Ionicons name="close" size={22} color={Colors.textMuted} />
-        </TouchableOpacity>
-      </View>
 
-      <ScrollView contentContainerStyle={styles.content}>
-        {image ? (
-          <View style={styles.preview}>
-            <Image source={{ uri: image.uri }} style={styles.previewImg} resizeMode="cover" />
-            <TouchableOpacity style={styles.removeImg} onPress={() => setImage(null)}>
-              <Ionicons name="close-circle" size={28} color={Colors.alert} />
+        <ScrollView contentContainerStyle={styles.content}>
+          {image ? (
+            <View style={styles.preview}>
+              <Image source={{ uri: image.uri }} style={styles.previewImg} resizeMode="cover" />
+              <TouchableOpacity style={styles.removeImg} onPress={() => setImage(null)}>
+                <Ionicons name="close-circle" size={28} color={Colors.alert} />
+              </TouchableOpacity>
+            </View>
+          ) : (
+            <View style={styles.pickerArea}>
+              <Ionicons name="document-text-outline" size={56} color={Colors.textMuted} />
+              <Text style={styles.pickerHint}>Foto, galería o nota de voz</Text>
+            </View>
+          )}
+
+          {/* Opciones de captura */}
+          <View style={styles.actions}>
+            <TouchableOpacity style={styles.actionCard} onPress={() => pickImage(true)}>
+              <View style={[styles.actionIcon, { backgroundColor: Colors.primary + '22' }]}>
+                <Ionicons name="camera" size={28} color={Colors.primary} />
+              </View>
+              <Text style={styles.actionText}>Cámara</Text>
             </TouchableOpacity>
-          </View>
-        ) : (
-          <View style={styles.pickerArea}>
-            <Ionicons name="document-text-outline" size={56} color={Colors.textMuted} />
-            <Text style={styles.pickerHint}>Sin imagen seleccionada</Text>
-          </View>
-        )}
 
-        <View style={styles.actions}>
-          <TouchableOpacity style={styles.actionCard} onPress={() => pickImage(true)}>
-            <View style={[styles.actionIcon, { backgroundColor: Colors.primary + '22' }]}>
-              <Ionicons name="camera" size={28} color={Colors.primary} />
+            <TouchableOpacity style={styles.actionCard} onPress={() => pickImage(false)}>
+              <View style={[styles.actionIcon, { backgroundColor: Colors.info + '22' }]}>
+                <Ionicons name="images-outline" size={28} color={Colors.info} />
+              </View>
+              <Text style={styles.actionText}>Galería</Text>
+            </TouchableOpacity>
+
+            <View style={styles.actionCard}>
+              {voiceLoading ? (
+                <>
+                  <View style={[styles.actionIcon, { backgroundColor: Colors.healthy + '22' }]}>
+                    <ActivityIndicator color={Colors.healthy} size="small" />
+                  </View>
+                  <Text style={styles.actionText}>Procesando...</Text>
+                </>
+              ) : (
+                <>
+                  <VoiceRecordButton
+                    size={56}
+                    onCapture={handleVoiceCapture}
+                    disabled={voiceLoading}
+                  />
+                </>
+              )}
             </View>
-            <Text style={styles.actionText}>Cámara</Text>
+          </View>
+
+          {/* Botón analizar foto */}
+          {image && (
+            <TouchableOpacity
+              style={[styles.processBtn, uploading && { opacity: 0.6 }]}
+              onPress={handleUpload}
+              disabled={uploading}
+              activeOpacity={0.8}
+            >
+              {uploading ? (
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                  <ActivityIndicator color={Colors.white} size="small" />
+                  <Text style={styles.processBtnText}>Procesando con IA...</Text>
+                </View>
+              ) : (
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                  <Ionicons name="sparkles" size={20} color={Colors.white} />
+                  <Text style={styles.processBtnText}>Analizar con IA</Text>
+                </View>
+              )}
+            </TouchableOpacity>
+          )}
+
+          <View style={styles.infoBox}>
+            <Ionicons name="information-circle-outline" size={16} color={Colors.info} />
+            <Text style={styles.infoText}>
+              Foto: extrae medicamentos y exámenes de la fórmula.{'\n'}
+              Voz: dicta la consulta y la IA completa los campos de la visita.
+            </Text>
+          </View>
+        </ScrollView>
+      </SafeAreaView>
+    );
+  }
+
+  // ── Step: voice_confirm ──────────────────────────────────────────────────────
+  if (step === 'voice_confirm') {
+    const s = voiceStructured;
+    const fields = [
+      s?.doctor_name      && { label: 'Médico',           value: s.doctor_name      },
+      s?.specialty        && { label: 'Especialidad',     value: s.specialty        },
+      s?.institution_name && { label: 'Institución',      value: s.institution_name },
+      s?.reason_for_visit && { label: 'Motivo',           value: s.reason_for_visit },
+      s?.diagnosis        && { label: 'Diagnóstico',      value: s.diagnosis        },
+      s?.notes            && { label: 'Observaciones',    value: s.notes            },
+    ].filter(Boolean) as { label: string; value: string }[];
+
+    const meds: any[] = s?.medications?.filter((m: any) => m.medication_name) ?? [];
+
+    return (
+      <SafeAreaView style={styles.safe}>
+        <View style={styles.stepHeader}>
+          <TouchableOpacity onPress={() => setStep('capture')} style={styles.backBtn}>
+            <Ionicons name="arrow-back" size={22} color={Colors.textPrimary} />
           </TouchableOpacity>
-          <TouchableOpacity style={styles.actionCard} onPress={() => pickImage(false)}>
-            <View style={[styles.actionIcon, { backgroundColor: Colors.info + '22' }]}>
-              <Ionicons name="images-outline" size={28} color={Colors.info} />
-            </View>
-            <Text style={styles.actionText}>Galería</Text>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.stepHeaderTitle}>Nota de voz</Text>
+            <Text style={styles.stepHeaderSub}>
+              {selectedMember?.first_name} · {formatDate(selectedVisit?.visit_date)}
+            </Text>
+          </View>
+          <TouchableOpacity onPress={reset} style={styles.backBtn}>
+            <Ionicons name="close" size={22} color={Colors.textMuted} />
           </TouchableOpacity>
         </View>
 
-        {image && (
+        <ScrollView contentContainerStyle={styles.content}>
+          {/* Transcripción */}
+          <View style={styles.transcriptBox}>
+            <View style={styles.transcriptHeader}>
+              <Ionicons name="mic" size={14} color={Colors.primary} />
+              <Text style={styles.transcriptLabel}>Transcripción</Text>
+            </View>
+            <Text style={styles.transcriptText}>{voiceTranscript}</Text>
+          </View>
+
+          {/* Datos extraídos */}
+          {fields.length > 0 && (
+            <View style={styles.extractedCard}>
+              <Text style={styles.extractedTitle}>Datos detectados por IA</Text>
+              {fields.map(f => (
+                <View key={f.label} style={styles.extractedRow}>
+                  <Text style={styles.extractedLabel}>{f.label}</Text>
+                  <Text style={styles.extractedValue}>{f.value}</Text>
+                </View>
+              ))}
+            </View>
+          )}
+
+          {/* Medicamentos detectados */}
+          {meds.length > 0 && (
+            <View style={styles.extractedCard}>
+              <Text style={styles.extractedTitle}>Medicamentos ({meds.length})</Text>
+              {meds.map((m: any, i: number) => (
+                <View key={i} style={styles.medRow}>
+                  <Ionicons name="medkit-outline" size={14} color={Colors.healthy} />
+                  <Text style={styles.medRowText}>
+                    {m.medication_name}
+                    {m.dose_amount ? ` ${m.dose_amount}${m.dose_unit}` : ''}
+                    {m.frequency_text ? ` · ${m.frequency_text}` : ''}
+                  </Text>
+                </View>
+              ))}
+            </View>
+          )}
+
           <TouchableOpacity
-            style={[styles.processBtn, uploading && { opacity: 0.6 }]}
-            onPress={handleUpload}
-            disabled={uploading}
+            style={[styles.processBtn, savingVoice && { opacity: 0.6 }]}
+            onPress={handleSaveVoice}
+            disabled={savingVoice}
             activeOpacity={0.8}
           >
-            {uploading ? (
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
-                <ActivityIndicator color={Colors.white} size="small" />
-                <Text style={styles.processBtnText}>Procesando con IA...</Text>
-              </View>
+            {savingVoice ? (
+              <ActivityIndicator color={Colors.white} />
             ) : (
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                <Ionicons name="sparkles" size={20} color={Colors.white} />
-                <Text style={styles.processBtnText}>Analizar con IA</Text>
+                <Ionicons name="checkmark-circle" size={20} color={Colors.white} />
+                <Text style={styles.processBtnText}>Guardar nota de voz</Text>
               </View>
             )}
           </TouchableOpacity>
-        )}
+        </ScrollView>
+      </SafeAreaView>
+    );
+  }
 
-        <View style={styles.infoBox}>
-          <Ionicons name="information-circle-outline" size={16} color={Colors.info} />
-          <Text style={styles.infoText}>
-            La IA extrae medicamentos, dosis y exámenes. Siempre podrás revisar y editar antes de guardar.
-          </Text>
-        </View>
-      </ScrollView>
-    </SafeAreaView>
-  );
+  return null;
 }
 
 const styles = StyleSheet.create({
@@ -546,4 +823,26 @@ const styles = StyleSheet.create({
     borderRadius: Radius.md, padding: Spacing.md, alignItems: 'flex-start',
   },
   infoText: { color: Colors.textSecondary, fontSize: Typography.xs, flex: 1, lineHeight: 18 },
+
+  // Transcript
+  transcriptBox: {
+    backgroundColor: Colors.surface, borderRadius: Radius.xl,
+    borderWidth: 1, borderColor: Colors.primary + '33', padding: Spacing.md, gap: Spacing.sm,
+  },
+  transcriptHeader: { flexDirection: 'row', alignItems: 'center', gap: Spacing.xs },
+  transcriptLabel:  { color: Colors.primary, fontSize: Typography.xs, fontWeight: Typography.semibold, textTransform: 'uppercase', letterSpacing: 0.5 },
+  transcriptText:   { color: Colors.textPrimary, fontSize: Typography.base, lineHeight: 22 },
+
+  // Extracted data
+  extractedCard: {
+    backgroundColor: Colors.surface, borderRadius: Radius.xl,
+    borderWidth: 1, borderColor: Colors.border, padding: Spacing.md, gap: Spacing.sm,
+  },
+  extractedTitle: { color: Colors.textSecondary, fontSize: Typography.xs, fontWeight: Typography.semibold, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 2 },
+  extractedRow:   { flexDirection: 'row', gap: Spacing.sm },
+  extractedLabel: { color: Colors.textMuted, fontSize: Typography.sm, width: 100, flexShrink: 0 },
+  extractedValue: { color: Colors.textPrimary, fontSize: Typography.sm, flex: 1 },
+
+  medRow:     { flexDirection: 'row', alignItems: 'center', gap: Spacing.sm },
+  medRowText: { color: Colors.textPrimary, fontSize: Typography.sm, flex: 1 },
 });

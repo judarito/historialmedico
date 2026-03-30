@@ -14,14 +14,22 @@
     },
     "ios": {
       "supportsTablet": false,
-      "bundleIdentifier": "com.familiahealthtracker.app"
+      "bundleIdentifier": "com.familiahealthtracker.app",
+      "infoPlist": {
+        "NSSpeechRecognitionUsageDescription": "Permitir reconocimiento de voz para transcribir consultas médicas",
+        "NSMicrophoneUsageDescription": "Permitir acceso al micrófono para dictar notas de voz"
+      }
     },
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./src/assets/icon-heart-plus.png",
         "backgroundColor": "#0B1628"
       },
-      "package": "com.familiahealthtracker.app"
+      "package": "com.familiahealthtracker.app",
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO"
+      ]
     },
     "plugins": [
       "expo-router",
@@ -49,6 +57,12 @@
     },
     "experiments": {
       "typedRoutes": true
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "d2e708b8-fceb-4239-8a1d-df5ce8d3d5d2"
+      }
     }
   }
 }

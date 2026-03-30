@@ -29,24 +29,33 @@ interface ExtractedMed {
 interface ExtractedTest {
   test_name: string;
   category:  string;
-  notes:     string;
+  instructions?: string;
 }
 
 export default function ConfirmScanRoute() {
-  const { documentId, memberName, visitDate, doctorName } = useLocalSearchParams<{
+  const { documentId, memberName, visitDate, doctorName, manual, processingError } = useLocalSearchParams<{
     documentId: string;
     memberName: string;
     visitId?:   string;
     visitDate?: string;
     doctorName?: string;
+    manual?: string;
+    processingError?: string;
   }>();
   const [status,   setStatus]   = useState<'loading' | 'ready' | 'error'>('loading');
   const [meds,     setMeds]     = useState<ExtractedMed[]>([]);
   const [tests,    setTests]    = useState<ExtractedTest[]>([]);
   const [saving,   setSaving]   = useState(false);
   const [attempts, setAttempts] = useState(0);
+  const [errorMessage, setErrorMessage] = useState(processingError ?? '');
 
-  useEffect(() => { pollDocument(); }, []);
+  useEffect(() => {
+    if (manual === '1') {
+      setStatus('ready');
+      return;
+    }
+    pollDocument();
+  }, []);
 
   async function pollDocument() {
     if (!documentId) return;
@@ -55,7 +64,7 @@ export default function ConfirmScanRoute() {
       await sleep(5000);
       const { data } = await supabase
         .from('medical_documents')
-        .select('processing_status, parsed_json')
+        .select('processing_status, parsed_json, processing_error')
         .eq('id', documentId)
         .single();
 
@@ -65,14 +74,17 @@ export default function ConfirmScanRoute() {
         const parsed = data.parsed_json as any;
         setMeds(parsed?.medications ?? []);
         setTests(parsed?.tests ?? []);
+        setErrorMessage('');
         setStatus('ready');
         return;
       }
       if (data?.processing_status === 'failed') {
+        setErrorMessage(data.processing_error ?? 'No se pudo extraer informacion de la imagen.');
         setStatus('error');
         return;
       }
     }
+    setErrorMessage('La imagen se quedo sin respuesta valida del procesador. Puedes completar los datos manualmente.');
     setStatus('error');
   }
 
@@ -89,9 +101,12 @@ export default function ConfirmScanRoute() {
     setSaving(false);
     if (error) { Alert.alert('Error al guardar', error.message); return; }
 
+    const hasEntries = meds.some(m => m.medication_name.trim()) || tests.some(t => t.test_name.trim());
     Alert.alert(
       '¡Listo!',
-      `Se guardaron ${meds.length} medicamento(s) y ${tests.length} examen(es). Los recordatorios de dosis fueron generados.`,
+      hasEntries
+        ? `Se guardaron ${meds.length} medicamento(s) y ${tests.length} examen(es).`
+        : 'La foto quedo confirmada sin registros estructurados. Puedes completar la visita manualmente despues.',
       [{ text: 'Ir a medicamentos', onPress: () => router.replace('/(app)/(tabs)/medications') }]
     );
   }
@@ -106,6 +121,18 @@ export default function ConfirmScanRoute() {
 
   function addMed() {
     setMeds(prev => [...prev, { medication_name: '', dose_amount: null, dose_unit: 'mg', frequency_text: '', interval_hours: null, duration_days: null, route: 'oral', instructions: '' }]);
+  }
+
+  function updateTest(i: number, field: keyof ExtractedTest, value: string) {
+    setTests(prev => prev.map((t, idx) => idx === i ? { ...t, [field]: value } : t));
+  }
+
+  function removeTest(i: number) {
+    setTests(prev => prev.filter((_, idx) => idx !== i));
+  }
+
+  function addTest() {
+    setTests(prev => [...prev, { test_name: '', category: '', instructions: '' }]);
   }
 
   // ── Loading state ────────────────────────────────────────────
@@ -139,7 +166,7 @@ export default function ConfirmScanRoute() {
         <View style={styles.center}>
           <Ionicons name="warning-outline" size={56} color={Colors.warning} />
           <Text style={styles.loadingTitle}>No se pudo procesar</Text>
-          <Text style={styles.loadingText}>La IA no pudo extraer datos de la imagen. Puedes agregar los medicamentos manualmente.</Text>
+          <Text style={styles.loadingText}>{errorMessage || 'La IA no pudo extraer datos de la imagen. Puedes completar los datos manualmente.'}</Text>
           <TouchableOpacity style={styles.retryBtn} onPress={() => { setStatus('loading'); setAttempts(0); pollDocument(); }}>
             <Text style={styles.retryText}>Reintentar</Text>
           </TouchableOpacity>
@@ -179,6 +206,13 @@ export default function ConfirmScanRoute() {
       ) : null}
 
       <ScrollView contentContainerStyle={styles.content}>
+        {!!errorMessage && (
+          <View style={styles.warningBox}>
+            <Ionicons name="warning-outline" size={16} color={Colors.warning} />
+            <Text style={styles.warningText}>{errorMessage}</Text>
+          </View>
+        )}
+
         {/* Medicamentos */}
         <View style={styles.section}>
           <View style={styles.sectionHeader}>
@@ -214,26 +248,43 @@ export default function ConfirmScanRoute() {
         </View>
 
         {/* Exámenes */}
-        {tests.length > 0 && (
-          <View style={styles.section}>
+        <View style={styles.section}>
+          <View style={styles.sectionHeader}>
             <Text style={styles.sectionTitle}>Exámenes ({tests.length})</Text>
-            {tests.map((t, i) => (
-              <View key={i} style={styles.testCard}>
-                <Ionicons name="flask-outline" size={16} color={Colors.info} />
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.testName}>{t.test_name}</Text>
-                  {t.category && <Text style={styles.testMeta}>{t.category}</Text>}
-                </View>
-              </View>
-            ))}
+            <TouchableOpacity onPress={addTest} style={styles.addRowBtn}>
+              <Ionicons name="add" size={18} color={Colors.primary} />
+              <Text style={styles.addRowText}>Agregar</Text>
+            </TouchableOpacity>
           </View>
-        )}
+
+          {tests.length === 0 && (
+            <Text style={styles.emptyText}>Sin exámenes detectados. Toca "Agregar".</Text>
+          )}
+
+          {tests.map((t, i) => (
+            <View key={i} style={styles.medCard}>
+              <View style={styles.medCardHeader}>
+                <Text style={styles.medCardNum}>Examen {i + 1}</Text>
+                <TouchableOpacity onPress={() => removeTest(i)}>
+                  <Ionicons name="trash-outline" size={16} color={Colors.alert} />
+                </TouchableOpacity>
+              </View>
+              <EditField label="Nombre *" value={t.test_name} onChangeText={v => updateTest(i, 'test_name', v)} />
+              <EditField label="Categoría" value={t.category} onChangeText={v => updateTest(i, 'category', v)} placeholder="Ej: laboratorio, imagen" />
+              <EditField label="Indicaciones" value={t.instructions ?? ''} onChangeText={v => updateTest(i, 'instructions', v)} multiline />
+            </View>
+          ))}
+        </View>
 
         {/* Confirmar */}
+        {(() => {
+          const hasEntries = meds.some(m => m.medication_name.trim()) || tests.some(t => t.test_name.trim());
+          const allowEmptyConfirm = Boolean(errorMessage);
+          return (
         <TouchableOpacity
-          style={[styles.confirmBtn, (saving || meds.every(m => !m.medication_name.trim())) && { opacity: 0.6 }]}
+          style={[styles.confirmBtn, (saving || (!hasEntries && !allowEmptyConfirm)) && { opacity: 0.6 }]}
           onPress={handleConfirm}
-          disabled={saving || meds.every(m => !m.medication_name.trim())}
+          disabled={saving || (!hasEntries && !allowEmptyConfirm)}
           activeOpacity={0.8}
         >
           {saving
@@ -241,11 +292,15 @@ export default function ConfirmScanRoute() {
             : (
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
                 <Ionicons name="checkmark-circle" size={20} color={Colors.white} />
-                <Text style={styles.confirmBtnText}>Guardar y generar recordatorios</Text>
+                <Text style={styles.confirmBtnText}>
+                  {errorMessage ? 'Guardar manualmente' : 'Guardar y generar recordatorios'}
+                </Text>
               </View>
             )
           }
         </TouchableOpacity>
+          );
+        })()}
 
         <View style={{ height: Spacing.xxxl }} />
       </ScrollView>
@@ -297,6 +352,17 @@ const styles = StyleSheet.create({
   retryText: { color: Colors.white, fontSize: Typography.base, fontWeight: Typography.semibold },
 
   content: { padding: Spacing.base, gap: Spacing.xl },
+  warningBox: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: Spacing.sm,
+    backgroundColor: Colors.warningBg,
+    borderRadius: Radius.md,
+    borderWidth: 1,
+    borderColor: Colors.warning + '55',
+    padding: Spacing.md,
+  },
+  warningText: { color: Colors.textSecondary, fontSize: Typography.sm, flex: 1, lineHeight: 20 },
 
   section: { gap: Spacing.md },
   sectionHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },

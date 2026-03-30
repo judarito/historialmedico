@@ -9,4 +9,4 @@ ALTER TABLE medical_visits
   ADD COLUMN IF NOT EXISTS voice_note_text TEXT;  -- transcripción de la nota de voz
 
 COMMENT ON COLUMN medical_visits.voice_note_url  IS 'URL pública del audio en Supabase Storage (bucket medical-documents)';
-COMMENT ON COLUMN medical_visits.voice_note_text IS 'Transcripción automática de la nota de voz via Whisper';
+COMMENT ON COLUMN medical_visits.voice_note_text IS 'Transcripción automática de la nota de voz (reconocimiento nativo del dispositivo)';

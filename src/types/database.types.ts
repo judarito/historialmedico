@@ -9,7 +9,7 @@ export type Json = string | number | boolean | null | { [key: string]: Json } | 
 export type TenantUserRole         = "owner" | "admin" | "member" | "viewer";
 export type RelationshipType       = "self" | "spouse" | "son" | "daughter" | "father" | "mother" | "brother" | "sister" | "grandfather" | "grandmother" | "guardian" | "other";
 export type DocumentProcessingStatus = "pending" | "processing" | "processed" | "verified" | "failed";
-export type DocumentType           = "formula" | "medical_order" | "lab_order" | "lab_result" | "imaging_result" | "incapacity" | "clinical_note" | "vaccination_card" | "other";
+export type DocumentType           = "formula" | "medical_order" | "lab_order" | "lab_result" | "imaging_result" | "incapacity" | "clinical_note" | "vaccination_card" | "voice_note" | "other";
 export type MedicationRoute        = "oral" | "nasal" | "topical" | "ophthalmic" | "otic" | "inhaled" | "nebulized" | "intramuscular" | "intravenous" | "subcutaneous" | "rectal" | "other";
 export type PrescriptionStatus     = "active" | "completed" | "paused" | "cancelled";
 export type ScheduleStatus         = "pending" | "taken" | "skipped" | "late" | "cancelled";
@@ -130,6 +130,8 @@ export interface Database {
           temperature_c:     number | null;
           blood_pressure:    string | null;
           heart_rate:        number | null;
+          voice_note_url:    string | null;
+          voice_note_text:   string | null;
           status:            VisitStatus;
           created_by:        string;
           created_at:        string;

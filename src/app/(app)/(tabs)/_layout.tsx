@@ -55,7 +55,7 @@ export default function TabsLayout() {
         options={{
           title: 'Escanear',
           tabBarButton: (props) => <ScanTabButton {...props} />,
-          tabBarIcon: () => <Ionicons name="camera" size={28} color={Colors.white} />,
+          tabBarIcon: () => <Ionicons name="sparkles" size={28} color={Colors.white} />,
           tabBarLabel: () => null,
         }}
       />

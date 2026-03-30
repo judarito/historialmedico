@@ -14,7 +14,7 @@
 
 import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 
-const DEEPSEEK_API_KEY = Deno.env.get("DEEPSEEK_API_KEY")!;
+const DEEPSEEK_API_KEY = Deno.env.get("DEEPSEEK_API_KEY");
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin":  "*",
@@ -24,6 +24,10 @@ const CORS_HEADERS = {
 // ── DeepSeek: texto → datos médicos estructurados ─────────────────────────
 
 async function extractVisitData(transcription: string): Promise<object> {
+  if (!DEEPSEEK_API_KEY) {
+    throw new Error("Falta DEEPSEEK_API_KEY en los secrets de Supabase");
+  }
+
   const systemPrompt = `Eres un asistente médico colombiano. Extrae datos médicos estructurados de una nota de voz transcrita.
 Si un campo no se menciona, devuelve null para ese campo.
 Responde ÚNICAMENTE con JSON válido.`;
@@ -59,28 +63,41 @@ Extrae los datos en este formato JSON:
 }`;
 
   const response = await fetch("https://api.deepseek.com/chat/completions", {
-    method:  "POST",
+    method: "POST",
     headers: {
-      "Content-Type":  "application/json",
+      "Content-Type": "application/json",
       "Authorization": `Bearer ${DEEPSEEK_API_KEY}`,
     },
     body: JSON.stringify({
-      model:           "deepseek-chat",
+      model: "deepseek-chat",
       messages: [
         { role: "system", content: systemPrompt },
-        { role: "user",   content: userPrompt   },
+        { role: "user", content: userPrompt },
       ],
-      temperature:     0.1,
-      max_tokens:      1000,
+      temperature: 0.1,
+      max_tokens: 1000,
       response_format: { type: "json_object" },
     }),
   });
 
-  if (!response.ok) throw new Error(`DeepSeek error ${response.status}`);
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`DeepSeek error ${response.status}: ${errText}`);
+  }
 
-  const result  = await response.json();
+  const result = await response.json();
   const content = result.choices?.[0]?.message?.content;
-  return JSON.parse(content);
+  if (typeof content !== "string" || !content.trim()) {
+    throw new Error("DeepSeek no retorno contenido util");
+  }
+
+  const cleaned = content
+    .replace(/^```json\s*/i, "")
+    .replace(/^```\s*/i, "")
+    .replace(/\s*```$/, "")
+    .trim();
+
+  return JSON.parse(cleaned);
 }
 
 // ── Handler ────────────────────────────────────────────────────────────────

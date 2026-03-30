@@ -18,7 +18,7 @@ import { VoiceRecordButton } from '../../components/ui/VoiceRecordButton';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
-type FilterCategory = 'all' | 'member' | 'medication' | 'diagnosis' | 'doctor' | 'specialist' | 'test';
+type FilterCategory = 'all' | 'member' | 'medication' | 'diagnosis' | 'doctor' | 'specialist' | 'test' | 'document';
 
 interface SearchResult {
   result_type:     string;
@@ -49,13 +49,15 @@ const FILTER_CHIPS: { key: FilterCategory; label: string; icon: any }[] = [
   { key: 'doctor',     label: 'Médico',       icon: 'person-circle-outline' },
   { key: 'specialist', label: 'Especialidad', icon: 'medal-outline'         },
   { key: 'test',       label: 'Examen',       icon: 'flask-outline'         },
+  { key: 'document',   label: 'Adjunto',      icon: 'attach-outline'        },
 ];
 
 const TYPE_META: Record<string, { icon: any; color: string; navTarget: 'member' | 'visit' }> = {
-  member:     { icon: 'person',    color: Colors.primary, navTarget: 'member' },
-  medication: { icon: 'medkit',    color: Colors.healthy, navTarget: 'member' },
-  visit:      { icon: 'calendar',  color: Colors.info,    navTarget: 'visit'  },
-  test:       { icon: 'flask',     color: Colors.warning, navTarget: 'member' },
+  member:     { icon: 'person',          color: Colors.primary, navTarget: 'member' },
+  medication: { icon: 'medkit',          color: Colors.healthy, navTarget: 'member' },
+  visit:      { icon: 'calendar',        color: Colors.info,    navTarget: 'visit'  },
+  test:       { icon: 'flask',           color: Colors.warning, navTarget: 'member' },
+  document:   { icon: 'attach',          color: Colors.warning, navTarget: 'visit'  },
 };
 
 // ── Helpers ──────────────────────────────────────────────────────────────────

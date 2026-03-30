@@ -1,13 +1,13 @@
 // ============================================================
 // Edge Function: process-prescription (schema real)
-// Flujo: imagen → DeepSeek → medical_documents.parsed_json
+// Flujo: imagen → OpenAI Vision → medical_documents.parsed_json
 // El usuario luego confirma via RPC confirm_document_and_create_records
 // ============================================================
 
 import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
-const DEEPSEEK_API_KEY          = Deno.env.get("DEEPSEEK_API_KEY")!;
+const OPENAI_API_KEY            = Deno.env.get("OPENAI_API_KEY");
 const SUPABASE_URL              = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
@@ -43,9 +43,12 @@ interface AIExtractionResult {
 }
 
 // ============================================================
-// Llamada a DeepSeek Vision API
+// Llamada a OpenAI Vision API
 // ============================================================
-async function extractWithDeepSeek(imageBase64: string): Promise<AIExtractionResult> {
+async function extractWithOpenAI(imageUrl: string): Promise<AIExtractionResult> {
+  if (!OPENAI_API_KEY) {
+    throw new Error("Falta OPENAI_API_KEY en los secrets de Supabase");
+  }
 
   const systemPrompt = `Eres un asistente médico experto en interpretar fórmulas médicas latinoamericanas (Colombia, México, Argentina, etc.).
 Extraes información estructurada de imágenes de fórmulas médicas con máxima precisión.
@@ -95,43 +98,51 @@ REGLAS:
   "confidence": 0.0
 }`;
 
-  const response = await fetch("https://api.deepseek.com/chat/completions", {
+  const response = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "Authorization": `Bearer ${DEEPSEEK_API_KEY}`,
+      "Authorization": `Bearer ${OPENAI_API_KEY}`,
     },
     body: JSON.stringify({
-      model: "deepseek-chat",
+      model: "gpt-4.1-mini",
       messages: [
         { role: "system", content: systemPrompt },
         {
           role: "user",
           content: [
-            { type: "image_url", image_url: { url: imageBase64 } },
-            { type: "text", content: userPrompt }
-          ]
-        }
+            { type: "text", text: userPrompt },
+            { type: "image_url", image_url: { url: imageUrl } },
+          ],
+        },
       ],
       temperature: 0.1,
       max_tokens: 2000,
-      response_format: { type: "json_object" }
+      response_format: { type: "json_object" },
     }),
   });
 
   if (!response.ok) {
     const errText = await response.text();
-    throw new Error(`DeepSeek error ${response.status}: ${errText}`);
+    throw new Error(`OpenAI error ${response.status}: ${errText}`);
   }
 
   const result = await response.json();
   const content = result.choices?.[0]?.message?.content;
-  if (!content) throw new Error("DeepSeek no retornó contenido");
+  if (typeof content !== "string" || !content.trim()) {
+    throw new Error("OpenAI no retorno contenido util");
+  }
 
-  const parsed = JSON.parse(content) as AIExtractionResult;
+  const cleaned = content
+    .replace(/^```json\s*/i, "")
+    .replace(/^```\s*/i, "")
+    .replace(/\s*```$/, "")
+    .trim();
+
+  const parsed = JSON.parse(cleaned) as AIExtractionResult;
   if (!parsed.medications)  parsed.medications  = [];
   if (!parsed.tests)        parsed.tests        = [];
-  if (!parsed.confidence)   parsed.confidence   = 0.5;
+  if (parsed.confidence == null) parsed.confidence = 0.5;
 
   return parsed;
 }
@@ -185,11 +196,13 @@ serve(async (req) => {
     // 2. Marcar como procesando
     await supabaseUser
       .from("medical_documents")
-      .update({ processing_status: "processing" })
+      .update({
+        processing_status: "processing",
+        processing_error: null,
+      })
       .eq("id", document_id);
 
     // 3. Obtener URL firmada del archivo (1 hora)
-    // file_path es la columna real en el schema existente
     const { data: signedData, error: urlErr } = await supabaseUser.storage
       .from("medical-documents")
       .createSignedUrl(doc.file_path, 3600);
@@ -198,53 +211,40 @@ serve(async (req) => {
       throw new Error(`No se pudo obtener URL firmada: ${urlErr?.message}`);
     }
 
-    // 4. Convertir imagen a base64
-    const imgResponse = await fetch(signedData.signedUrl);
-    if (!imgResponse.ok) throw new Error("No se pudo descargar la imagen");
+    // 4. Procesar con OpenAI Vision
+    const extracted = await extractWithOpenAI(signedData.signedUrl);
 
-    const arrayBuffer = await imgResponse.arrayBuffer();
-    const base64      = btoa(String.fromCharCode(...new Uint8Array(arrayBuffer)));
-    const mimeType    = doc.mime_type || "image/jpeg";
-    const imageBase64 = `data:${mimeType};base64,${base64}`;
-
-    // 5. Procesar con DeepSeek
-    const extracted = await extractWithDeepSeek(imageBase64);
-
-    // 6. Guardar resultado en el documento
-    // Usa parsed_json y extracted_text (columnas reales del schema)
+    // 5. Guardar resultado en el documento
     await supabaseUser
       .from("medical_documents")
       .update({
         parsed_json:       extracted,
-        extracted_text:    JSON.stringify(extracted), // texto plano para búsqueda
-        ai_model:          "deepseek-chat",
-        processing_status: "processed",    // listo para revisión humana
-        verified_by_user:  false,          // pendiente confirmación
+        extracted_text:    JSON.stringify(extracted),
+        ai_model:          "gpt-4.1-mini",
+        processing_status: "processed",
+        verified_by_user:  false,
         processing_error:  null,
       })
       .eq("id", document_id);
 
-    // 7. Log de auditoría
     await supabaseAdmin.rpc("log_audit_event", {
       p_tenant_id:   doc.tenant_id,
       p_action:      "AI_PROCESS_DOCUMENT",
       p_entity_name: "medical_documents",
       p_entity_id:   document_id,
       p_details:     {
-        ai_model:           "deepseek-chat",
-        confidence:         extracted.confidence,
-        medications_found:  extracted.medications.length,
-        tests_found:        extracted.tests.length,
+        ai_model:          "gpt-4.1-mini",
+        confidence:        extracted.confidence,
+        medications_found: extracted.medications.length,
+        tests_found:       extracted.tests.length,
       }
     });
 
     return new Response(
       JSON.stringify({
-        success:    true,
+        success: true,
         document_id,
         extracted,
-        // El frontend muestra estos datos para revisión humana
-        // Luego llama a confirm_document_and_create_records RPC
       }),
       { status: 200, headers: { "Content-Type": "application/json" } }
     );

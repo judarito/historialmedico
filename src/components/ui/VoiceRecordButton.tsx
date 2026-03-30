@@ -19,6 +19,7 @@ import {
   View,
   ViewStyle,
 } from 'react-native';
+import { Audio } from 'expo-av';
 import {
   ExpoSpeechRecognitionModule,
   useSpeechRecognitionEvent,
@@ -26,8 +27,14 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { Colors, Typography } from '../../theme';
 
+export interface VoiceCapturePayload {
+  transcription: string;
+  audioUri: string | null;
+}
+
 interface Props {
-  onTranscription: (text: string) => void;
+  onTranscription?: (text: string) => void;
+  onCapture?: (payload: VoiceCapturePayload) => void;
   size?:    number;
   style?:   ViewStyle;
   disabled?: boolean;
@@ -35,12 +42,14 @@ interface Props {
 
 type State = 'idle' | 'recording' | 'processing';
 
-export function VoiceRecordButton({ onTranscription, size = 56, style, disabled }: Props) {
+export function VoiceRecordButton({ onTranscription, onCapture, size = 56, style, disabled }: Props) {
   const [recState, setRecState] = useState<State>('idle');
   const [seconds,  setSeconds]  = useState(0);
   const pendingText = useRef('');
   const timerRef    = useRef<ReturnType<typeof setInterval> | null>(null);
   const pulseAnim   = useRef(new Animated.Value(1)).current;
+  const recordingRef = useRef<Audio.Recording | null>(null);
+  const audioUriRef  = useRef<string | null>(null);
 
   // ── Pulse while recording ────────────────────────────────────
   useEffect(() => {
@@ -76,27 +85,82 @@ export function VoiceRecordButton({ onTranscription, size = 56, style, disabled 
   });
 
   useSpeechRecognitionEvent('end', () => {
-    const text = pendingText.current.trim();
-    pendingText.current = '';
-    setRecState('idle');
-    setSeconds(0);
-    if (text) onTranscription(text);
+    void (async () => {
+      const activeRecording = recordingRef.current;
+      if (activeRecording) {
+        try {
+          await activeRecording.stopAndUnloadAsync();
+          audioUriRef.current = activeRecording.getURI() ?? audioUriRef.current;
+        } catch {
+          // noop
+        } finally {
+          recordingRef.current = null;
+          await Audio.setAudioModeAsync({
+            allowsRecordingIOS: false,
+            playsInSilentModeIOS: true,
+          }).catch(() => {});
+        }
+      }
+
+      const text = pendingText.current.trim();
+      const audioUri = audioUriRef.current;
+      pendingText.current = '';
+      setRecState('idle');
+      setSeconds(0);
+      if (onCapture) {
+        onCapture({ transcription: text, audioUri });
+      }
+      if (text && onTranscription) {
+        onTranscription(text);
+      }
+    })();
   });
 
   useSpeechRecognitionEvent('error', (event) => {
     console.warn('VoiceRecordButton error:', event.error, event.message);
     pendingText.current = '';
+    audioUriRef.current = null;
+    const activeRecording = recordingRef.current;
+    if (activeRecording) {
+      activeRecording.stopAndUnloadAsync().catch(() => {});
+      recordingRef.current = null;
+    }
+    Audio.setAudioModeAsync({
+      allowsRecordingIOS: false,
+      playsInSilentModeIOS: true,
+    }).catch(() => {});
     setRecState('idle');
     setSeconds(0);
   });
 
+  useEffect(() => {
+    return () => {
+      const activeRecording = recordingRef.current;
+      if (activeRecording) {
+        activeRecording.stopAndUnloadAsync().catch(() => {});
+      }
+    };
+  }, []);
+
   // ── Start ────────────────────────────────────────────────────
   const startRecording = useCallback(async () => {
     try {
-      const { granted } = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
-      if (!granted) return;
+      const speechPermission = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
+      const audioPermission = await Audio.requestPermissionsAsync();
+      if (!speechPermission.granted || !audioPermission.granted) return;
+
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: true,
+        playsInSilentModeIOS: true,
+      });
+
+      const recording = new Audio.Recording();
+      await recording.prepareToRecordAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
+      await recording.startAsync();
 
       pendingText.current = '';
+      audioUriRef.current = null;
+      recordingRef.current = recording;
       ExpoSpeechRecognitionModule.start({
         lang:           'es-CO',
         interimResults: true,
@@ -110,16 +174,35 @@ export function VoiceRecordButton({ onTranscription, size = 56, style, disabled 
   }, []);
 
   // ── Stop ─────────────────────────────────────────────────────
-  const stopRecording = useCallback(() => {
-    ExpoSpeechRecognitionModule.stop();
+  const stopRecording = useCallback(async () => {
+    setRecState('processing');
+
+    try {
+      const activeRecording = recordingRef.current;
+      if (activeRecording) {
+        await activeRecording.stopAndUnloadAsync();
+        audioUriRef.current = activeRecording.getURI() ?? null;
+        recordingRef.current = null;
+      }
+    } catch (err) {
+      console.warn('VoiceRecordButton stop audio:', err);
+      audioUriRef.current = null;
+    } finally {
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: false,
+        playsInSilentModeIOS: true,
+      }).catch(() => {});
+      ExpoSpeechRecognitionModule.stop();
+    }
+
     // 'end' event fires → handler above delivers the text
   }, []);
 
   // ── Toggle ───────────────────────────────────────────────────
   function handlePress() {
     if (disabled || recState === 'processing') return;
-    if (recState === 'idle')      startRecording();
-    else if (recState === 'recording') stopRecording();
+    if (recState === 'idle') void startRecording();
+    else if (recState === 'recording') void stopRecording();
   }
 
   // ── Render ───────────────────────────────────────────────────

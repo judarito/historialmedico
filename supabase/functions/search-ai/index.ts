@@ -11,9 +11,9 @@
 import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
-const DEEPSEEK_API_KEY          = Deno.env.get("DEEPSEEK_API_KEY")!;
-const SUPABASE_URL              = Deno.env.get("SUPABASE_URL")!;
-const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+const DEEPSEEK_API_KEY = Deno.env.get("DEEPSEEK_API_KEY");
+const SUPABASE_URL     = Deno.env.get("SUPABASE_URL")!;
+const SUPABASE_ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin":  "*",
@@ -43,6 +43,10 @@ interface DeepSeekExpansion {
 // ── DeepSeek: expandir términos médicos ────────────────────────────────────
 
 async function expandQuery(query: string): Promise<DeepSeekExpansion> {
+  if (!DEEPSEEK_API_KEY) {
+    throw new Error("Falta DEEPSEEK_API_KEY en los secrets de Supabase");
+  }
+
   const systemPrompt = `Eres un asistente médico colombiano experto en terminología clínica latinoamericana.
 Tu tarea es expandir consultas de búsqueda en historial médico a múltiples términos sinónimos.
 
@@ -70,26 +74,39 @@ Devuelve JSON:
     const response = await fetch("https://api.deepseek.com/chat/completions", {
       method: "POST",
       headers: {
-        "Content-Type":  "application/json",
+        "Content-Type": "application/json",
         "Authorization": `Bearer ${DEEPSEEK_API_KEY}`,
       },
       body: JSON.stringify({
-        model:           "deepseek-chat",
+        model: "deepseek-chat",
         messages: [
           { role: "system", content: systemPrompt },
-          { role: "user",   content: userPrompt   },
+          { role: "user", content: userPrompt },
         ],
-        temperature:     0.2,
-        max_tokens:      300,
+        temperature: 0.2,
+        max_tokens: 300,
         response_format: { type: "json_object" },
       }),
     });
 
-    if (!response.ok) throw new Error(`DeepSeek ${response.status}`);
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(`DeepSeek error ${response.status}: ${errText}`);
+    }
 
-    const result  = await response.json();
+    const result = await response.json();
     const content = result.choices?.[0]?.message?.content;
-    const parsed  = JSON.parse(content) as DeepSeekExpansion;
+    if (typeof content !== "string" || !content.trim()) {
+      throw new Error("DeepSeek no retorno contenido util");
+    }
+
+    const cleaned = content
+      .replace(/^```json\s*/i, "")
+      .replace(/^```\s*/i, "")
+      .replace(/\s*```$/, "")
+      .trim();
+
+    const parsed = JSON.parse(cleaned) as DeepSeekExpansion;
 
     // Asegurar que el término original siempre esté
     if (!parsed.terms.includes(query)) parsed.terms.unshift(query);
@@ -130,8 +147,8 @@ serve(async (req) => {
       });
     }
 
-    // Cliente con JWT del usuario (respeta RLS)
-    const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+    // Cliente con JWT del usuario — auth.uid() funciona correctamente dentro del RPC
+    const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
       global: { headers: { Authorization: authHeader } },
     });
 
