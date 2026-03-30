@@ -1,20 +1,17 @@
 pluginManagement {
-  def reactNativeGradlePlugin = new File(
-    providers.exec {
-      workingDir(rootDir)
-      commandLine("node", "--print", "require.resolve('@react-native/gradle-plugin/package.json', { paths: [require.resolve('react-native/package.json')] })")
-    }.standardOutput.asText.get().trim()
-  ).getParentFile().absolutePath
-  includeBuild(reactNativeGradlePlugin)
-  
-  def expoPluginsPath = new File(
-    providers.exec {
-      workingDir(rootDir)
-      commandLine("node", "--print", "require.resolve('expo-modules-autolinking/package.json', { paths: [require.resolve('expo/package.json')] })")
-    }.standardOutput.asText.get().trim(),
-    "../android/expo-gradle-plugin"
-  ).absolutePath
-  includeBuild(expoPluginsPath)
+  def projectRootDir = rootDir.getParentFile()
+  def reactNativeGradlePluginDir = new File(projectRootDir, "node_modules/@react-native/gradle-plugin")
+  def expoAutolinkingPluginDir = new File(projectRootDir, "node_modules/expo-modules-autolinking/android/expo-gradle-plugin")
+
+  if (!reactNativeGradlePluginDir.exists()) {
+    throw new GradleException("No se encontro node_modules/@react-native/gradle-plugin. Ejecuta npm install en la raiz del proyecto.")
+  }
+  if (!expoAutolinkingPluginDir.exists()) {
+    throw new GradleException("No se encontro node_modules/expo-modules-autolinking/android/expo-gradle-plugin. Ejecuta npm install en la raiz del proyecto.")
+  }
+
+  includeBuild(reactNativeGradlePluginDir.absolutePath)
+  includeBuild(expoAutolinkingPluginDir.absolutePath)
 }
 
 plugins {
