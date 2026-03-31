@@ -58,7 +58,7 @@ export function LoginScreen({ onLogin, onGoForgotPassword, onGoRegister, onGoBac
     <SafeAreaView style={styles.safe}>
       <KeyboardAvoidingView
         style={styles.flex}
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
       >
         {/* Header */}
         <View style={styles.header}>

@@ -10,6 +10,8 @@ import {
   ActivityIndicator,
   Image,
   TextInput,
+  KeyboardAvoidingView,
+  Platform,
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import { router, useLocalSearchParams } from 'expo-router';
@@ -37,6 +39,14 @@ import {
 type FamilyMember = Database['public']['Tables']['family_members']['Row'];
 type MedicalVisit = Database['public']['Tables']['medical_visits']['Row'];
 type Step = 'member' | 'visit' | 'capture' | 'voice_confirm';
+
+function sortVisitsByDateDesc(visits: MedicalVisit[]): MedicalVisit[] {
+  return [...visits].sort((a, b) => {
+    const aTime = a.visit_date ? new Date(a.visit_date).getTime() : 0;
+    const bTime = b.visit_date ? new Date(b.visit_date).getTime() : 0;
+    return bTime - aTime;
+  });
+}
 
 async function invokeProcessPrescription(documentId: string): Promise<{
   manualEntryRequired: boolean;
@@ -111,6 +121,7 @@ export default function ScanTab() {
   // Foto
   const [image,     setImage]     = useState<{ uri: string } | null>(null);
   const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
 
   // Voz
   const [voiceLoading,       setVoiceLoading]       = useState(false);
@@ -174,7 +185,7 @@ export default function ScanTab() {
       .is('deleted_at', null)
       .order('visit_date', { ascending: false })
       .limit(10);
-    setVisits((data as MedicalVisit[]) ?? []);
+    setVisits(sortVisitsByDateDesc((data as MedicalVisit[] | null) ?? []));
     setLoadingVisits(false);
   }
 
@@ -221,21 +232,26 @@ export default function ScanTab() {
       ? await ImagePicker.launchCameraAsync({ quality: 0.8 })
       : await ImagePicker.launchImageLibraryAsync({ quality: 0.8, mediaTypes: ['images'] });
     if (!result.canceled && result.assets[0]) {
-      setImage({ uri: result.assets[0].uri });
+      const pickedImage = { uri: result.assets[0].uri };
+      setImage(pickedImage);
+      setUploadError(null);
+      void handleUpload(pickedImage.uri);
     }
   }
 
-  async function handleUpload() {
-    if (!selectedMember || !selectedVisit || !image || !tenant || !family || !user) return;
+  async function handleUpload(imageUriOverride?: string) {
+    const imageUri = imageUriOverride ?? image?.uri;
+    if (!selectedMember || !selectedVisit || !imageUri || !tenant || !family || !user) return;
     const storedCapturedAt = toStoredIso(capturedAt, true);
     if (!storedCapturedAt) {
       Alert.alert('Error', 'La fecha del documento no es válida.');
       return;
     }
+    setUploadError(null);
     setUploading(true);
     try {
       const filePath = `${tenant.id}/${family.id}/${selectedMember.id}/${Date.now()}.jpg`;
-      const response = await fetch(image.uri);
+      const response = await fetch(imageUri);
       const arrayBuffer = await response.arrayBuffer();
 
       const { error: storageErr } = await supabase.storage
@@ -268,10 +284,12 @@ export default function ScanTab() {
 
       setUploading(false);
       setImage(null);
+      setUploadError(null);
       router.push({
         pathname: '/(app)/confirm-scan',
         params: {
           documentId:  doc.id,
+          memberId:    selectedMember.id,
           memberName:  selectedMember.first_name,
           visitId:     selectedVisit.id,
           visitDate:   selectedVisit.visit_date,
@@ -282,6 +300,7 @@ export default function ScanTab() {
       });
     } catch (err: any) {
       setUploading(false);
+      setUploadError(err.message ?? 'Intenta de nuevo');
       Alert.alert('Error al subir', err.message ?? 'Intenta de nuevo');
     }
   }
@@ -400,6 +419,7 @@ export default function ScanTab() {
     setSelectedVisit(null);
     setVisits([]);
     setImage(null);
+    setUploadError(null);
     setShowNewVisit(false);
     setNewVisitDoctor('');
     setNewVisitDate(createCurrentDateTimeInput());
@@ -458,20 +478,21 @@ export default function ScanTab() {
   if (step === 'visit') {
     return (
       <SafeAreaView style={styles.safe}>
-        <View style={styles.stepHeader}>
-          <TouchableOpacity onPress={() => setStep('member')} style={styles.backBtn}>
-            <Ionicons name="arrow-back" size={22} color={Colors.textPrimary} />
-          </TouchableOpacity>
-          <Text style={styles.stepHeaderTitle}>Vincular visita</Text>
-          <View style={{ width: 38 }} />
-        </View>
+        <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+          <View style={styles.stepHeader}>
+            <TouchableOpacity onPress={() => setStep('member')} style={styles.backBtn}>
+              <Ionicons name="arrow-back" size={22} color={Colors.textPrimary} />
+            </TouchableOpacity>
+            <Text style={styles.stepHeaderTitle}>Vincular visita</Text>
+            <View style={{ width: 38 }} />
+          </View>
 
-        <ScrollView contentContainerStyle={styles.content}>
-          <Text style={styles.subtitle}>
-            ¿A qué visita de{' '}
-            <Text style={{ color: Colors.primary, fontWeight: '600' }}>{selectedMember?.first_name}</Text>
-            {' '}corresponde este documento?
-          </Text>
+          <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
+            <Text style={styles.subtitle}>
+              ¿A qué visita de{' '}
+              <Text style={{ color: Colors.primary, fontWeight: '600' }}>{selectedMember?.first_name}</Text>
+              {' '}corresponde este documento?
+            </Text>
 
           {/* Crear nueva visita */}
           <TouchableOpacity
@@ -558,13 +579,14 @@ export default function ScanTab() {
             </View>
           ) : null}
 
-          {selectedVisit && !showNewVisit && (
-            <TouchableOpacity style={styles.primaryBtn} onPress={() => setStep('capture')}>
-              <Text style={styles.primaryBtnText}>Continuar</Text>
-              <Ionicons name="arrow-forward" size={20} color={Colors.white} />
-            </TouchableOpacity>
-          )}
-        </ScrollView>
+            {selectedVisit && !showNewVisit && (
+              <TouchableOpacity style={styles.primaryBtn} onPress={() => setStep('capture')}>
+                <Text style={styles.primaryBtnText}>Continuar</Text>
+                <Ionicons name="arrow-forward" size={20} color={Colors.white} />
+              </TouchableOpacity>
+            )}
+          </ScrollView>
+        </KeyboardAvoidingView>
       </SafeAreaView>
     );
   }
@@ -592,7 +614,15 @@ export default function ScanTab() {
           {image ? (
             <View style={styles.preview}>
               <Image source={{ uri: image.uri }} style={styles.previewImg} resizeMode="cover" />
-              <TouchableOpacity style={styles.removeImg} onPress={() => setImage(null)}>
+              <TouchableOpacity
+                style={[styles.removeImg, uploading && styles.disabledTouch]}
+                onPress={() => {
+                  if (uploading) return;
+                  setImage(null);
+                  setUploadError(null);
+                }}
+                disabled={uploading}
+              >
                 <Ionicons name="close-circle" size={28} color={Colors.alert} />
               </TouchableOpacity>
             </View>
@@ -605,21 +635,29 @@ export default function ScanTab() {
 
           {/* Opciones de captura */}
           <View style={styles.actions}>
-            <TouchableOpacity style={styles.actionCard} onPress={() => pickImage(true)}>
+            <TouchableOpacity
+              style={[styles.actionCard, uploading && styles.actionCardDisabled]}
+              onPress={() => pickImage(true)}
+              disabled={uploading}
+            >
               <View style={[styles.actionIcon, { backgroundColor: Colors.primary + '22' }]}>
                 <Ionicons name="camera" size={28} color={Colors.primary} />
               </View>
               <Text style={styles.actionText}>Cámara</Text>
             </TouchableOpacity>
 
-            <TouchableOpacity style={styles.actionCard} onPress={() => pickImage(false)}>
+            <TouchableOpacity
+              style={[styles.actionCard, uploading && styles.actionCardDisabled]}
+              onPress={() => pickImage(false)}
+              disabled={uploading}
+            >
               <View style={[styles.actionIcon, { backgroundColor: Colors.info + '22' }]}>
                 <Ionicons name="images-outline" size={28} color={Colors.info} />
               </View>
               <Text style={styles.actionText}>Galería</Text>
             </TouchableOpacity>
 
-            <View style={styles.actionCard}>
+            <View style={[styles.actionCard, uploading && styles.actionCardDisabled]}>
               {voiceLoading ? (
                 <>
                   <View style={[styles.actionIcon, { backgroundColor: Colors.healthy + '22' }]}>
@@ -632,50 +670,48 @@ export default function ScanTab() {
                   <VoiceRecordButton
                     size={56}
                     onCapture={handleVoiceCapture}
-                    disabled={voiceLoading}
+                    disabled={voiceLoading || uploading}
                   />
                 </>
               )}
             </View>
           </View>
 
-          {/* Fecha del documento (visible cuando hay imagen) */}
-          {image && (
-            <DatePickerField
-              label="Fecha del documento"
-              value={capturedAt}
-              onChange={setCapturedAt}
-              withTime
-              maximumDate={new Date()}
-            />
+          <DatePickerField
+            label="Fecha del documento"
+            value={capturedAt}
+            onChange={setCapturedAt}
+            withTime
+            maximumDate={new Date()}
+          />
+
+          {image && uploading && (
+            <View style={styles.processingBox}>
+              <ActivityIndicator color={Colors.primary} size="small" />
+              <View style={{ flex: 1, gap: 2 }}>
+                <Text style={styles.processingTitle}>Analizando evidencia...</Text>
+                <Text style={styles.processingText}>La IA ya arrancó apenas cargaste la foto.</Text>
+              </View>
+            </View>
           )}
 
-          {/* Botón analizar foto */}
-          {image && (
+          {image && !uploading && !!uploadError && (
             <TouchableOpacity
-              style={[styles.processBtn, uploading && { opacity: 0.6 }]}
-              onPress={handleUpload}
-              disabled={uploading}
+              style={styles.processBtn}
+              onPress={() => handleUpload()}
               activeOpacity={0.8}
             >
-              {uploading ? (
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
-                  <ActivityIndicator color={Colors.white} size="small" />
-                  <Text style={styles.processBtnText}>Procesando con IA...</Text>
-                </View>
-              ) : (
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                  <Ionicons name="sparkles" size={20} color={Colors.white} />
-                  <Text style={styles.processBtnText}>Analizar con IA</Text>
-                </View>
-              )}
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                <Ionicons name="refresh-outline" size={20} color={Colors.white} />
+                <Text style={styles.processBtnText}>Reintentar análisis</Text>
+              </View>
             </TouchableOpacity>
           )}
 
           <View style={styles.infoBox}>
             <Ionicons name="information-circle-outline" size={16} color={Colors.info} />
             <Text style={styles.infoText}>
-              Foto: extrae medicamentos y exámenes de la fórmula.{'\n'}
+              Foto: empieza a analizarse apenas la cargas.{'\n'}
               Voz: dicta la consulta y la IA completa los campos de la visita.
             </Text>
           </View>
@@ -801,6 +837,7 @@ export default function ScanTab() {
 
 const styles = StyleSheet.create({
   safe:    { flex: 1, backgroundColor: Colors.background },
+  flex:    { flex: 1 },
   content: { paddingHorizontal: Spacing.base, paddingTop: Spacing.lg, paddingBottom: Spacing.xxxl, gap: Spacing.lg },
 
   title:    { color: Colors.textPrimary,   fontSize: Typography.xl,  fontWeight: Typography.bold },
@@ -890,6 +927,7 @@ const styles = StyleSheet.create({
     padding: Spacing.lg, alignItems: 'center', gap: Spacing.sm,
     borderWidth: 1, borderColor: Colors.border,
   },
+  actionCardDisabled: { opacity: 0.6 },
   actionIcon: { width: 56, height: 56, borderRadius: 28, alignItems: 'center', justifyContent: 'center' },
   actionText: { color: Colors.textPrimary, fontSize: Typography.sm, fontWeight: Typography.semibold },
   processBtn: {
@@ -897,6 +935,26 @@ const styles = StyleSheet.create({
     alignItems: 'center', justifyContent: 'center',
   },
   processBtnText: { color: Colors.white, fontSize: Typography.md, fontWeight: Typography.bold },
+  processingBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.md,
+    backgroundColor: Colors.surface,
+    borderRadius: Radius.lg,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    padding: Spacing.md,
+  },
+  processingTitle: {
+    color: Colors.textPrimary,
+    fontSize: Typography.sm,
+    fontWeight: Typography.semibold,
+  },
+  processingText: {
+    color: Colors.textSecondary,
+    fontSize: Typography.xs,
+  },
+  disabledTouch: { opacity: 0.6 },
 
   // Shared
   primaryBtn: {

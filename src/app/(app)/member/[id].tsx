@@ -31,6 +31,14 @@ interface MemberData {
   pendingTests:   MedicalTest[];
 }
 
+function sortVisitsByDateDesc(visits: MedicalVisit[]): MedicalVisit[] {
+  return [...visits].sort((a, b) => {
+    const aTime = a.visit_date ? new Date(a.visit_date).getTime() : 0;
+    const bTime = b.visit_date ? new Date(b.visit_date).getTime() : 0;
+    return bTime - aTime;
+  });
+}
+
 export default function MemberDetailRoute() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const { members } = useFamilyStore();
@@ -66,7 +74,7 @@ export default function MemberDetailRoute() {
       setData({
         member:         memberRes.data as FamilyMember,
         upcomingVisits: upcomingVisitsRes.data ?? [],
-        recentVisits:   visitsRes.data ?? [],
+        recentVisits:   sortVisitsByDateDesc((visitsRes.data as MedicalVisit[] | null) ?? []),
         activeMeds:     medsRes.data ?? [],
         pendingTests:   testsRes.data ?? [],
       });
@@ -377,13 +385,29 @@ const styles = StyleSheet.create({
   medName: { color: Colors.textPrimary, fontSize: Typography.sm, fontWeight: Typography.medium },
   medMeta: { color: Colors.textSecondary, fontSize: Typography.xs },
 
-  visitRow: { flexDirection: 'row', gap: Spacing.sm },
+  visitRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.sm,
+    backgroundColor: Colors.background,
+    borderRadius: Radius.lg,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    paddingHorizontal: Spacing.sm,
+    paddingVertical: Spacing.sm,
+  },
   visitDate: {
-    width: 44, backgroundColor: Colors.background, borderRadius: Radius.sm,
-    alignItems: 'center', justifyContent: 'center', padding: 4,
+    width: 46,
+    minHeight: 46,
+    backgroundColor: Colors.surfaceHigh,
+    borderRadius: Radius.sm,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 4,
+    paddingVertical: 6,
   },
   visitDay: { color: Colors.primary, fontSize: Typography.xs, fontWeight: Typography.bold, textAlign: 'center' },
-  visitInfo: { flex: 1, gap: 3 },
+  visitInfo: { flex: 1, gap: 4 },
   visitDoctor: { color: Colors.textPrimary, fontSize: Typography.sm, fontWeight: Typography.medium },
   visitSpecialty: { color: Colors.textSecondary, fontSize: Typography.xs },
   visitDiag: { color: Colors.textMuted, fontSize: Typography.xs, fontStyle: 'italic' },

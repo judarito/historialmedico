@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import {
   View,
@@ -10,7 +10,7 @@ import {
   Alert,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { useLocalSearchParams } from 'expo-router';
+import { useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { useFamilyStore } from '../../../store/familyStore';
 import { useMedicationStore } from '../../../store/medicationStore';
 import { Colors, Typography, Spacing, Radius } from '../../../theme';
@@ -24,28 +24,100 @@ function getMemberDisplayName(member: Database['public']['Tables']['family_membe
 
 export default function MedicationsTab() {
   const { memberId } = useLocalSearchParams<{ memberId?: string }>();
-  const { members, fetchMembers } = useFamilyStore();
+  const { family, members, fetchMembers } = useFamilyStore();
   const { doses, loading, marking, fetchTodayDoses, markDose } = useMedicationStore();
   const [selectedMember, setSelectedMember] = useState<string | null>(null);
+  const [preferredMemberId, setPreferredMemberId] = useState<string | null>(memberId ?? null);
+  const selectedMemberRef = useRef<string | null>(null);
 
   useEffect(() => {
-    void fetchMembers().then(() => {
-      const { members: ms } = useFamilyStore.getState();
-      if (ms.length === 0) return;
+    selectedMemberRef.current = selectedMember;
+  }, [selectedMember]);
 
-      const requestedMember = memberId
-        ? ms.find((member) => member.id === memberId)
+  useEffect(() => {
+    setPreferredMemberId(memberId ?? null);
+  }, [memberId]);
+
+  const ensureMembersLoaded = useCallback(async (forceRefresh = false) => {
+    let currentMembers = members;
+    if (family?.id && (forceRefresh || currentMembers.length === 0)) {
+      await fetchMembers();
+      currentMembers = useFamilyStore.getState().members;
+    }
+    return currentMembers;
+  }, [family?.id, members, fetchMembers]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function syncMembers() {
+      const currentMembers = await ensureMembersLoaded();
+      if (cancelled) return;
+
+      if (currentMembers.length === 0) {
+        setSelectedMember(null);
+        return;
+      }
+
+      setSelectedMember((currentSelected) => {
+        const requestedMember = preferredMemberId
+          ? currentMembers.find((member) => member.id === preferredMemberId)
+          : null;
+        const preservedMember = currentSelected
+          ? currentMembers.find((member) => member.id === currentSelected)
+          : null;
+        return (requestedMember ?? preservedMember ?? currentMembers[0]).id;
+      });
+    }
+
+    void syncMembers();
+    return () => {
+      cancelled = true;
+    };
+  }, [ensureMembersLoaded, preferredMemberId]);
+
+  useEffect(() => {
+    if (!selectedMember) return;
+    void fetchTodayDoses(selectedMember);
+  }, [selectedMember, fetchTodayDoses]);
+
+  useFocusEffect(useCallback(() => {
+    let cancelled = false;
+
+    async function refreshOnFocus() {
+      const currentMembers = await ensureMembersLoaded(true);
+      if (cancelled) return;
+
+      if (currentMembers.length === 0) {
+        setSelectedMember(null);
+        return;
+      }
+
+      const requestedMember = preferredMemberId
+        ? currentMembers.find((member) => member.id === preferredMemberId)
         : null;
-      const initialMember = requestedMember ?? ms[0];
+      const preservedMember = selectedMemberRef.current
+        ? currentMembers.find((member) => member.id === selectedMemberRef.current)
+        : null;
+      const nextMemberId = (requestedMember ?? preservedMember ?? currentMembers[0]).id;
 
-      setSelectedMember(initialMember.id);
-      void fetchTodayDoses(initialMember.id);
-    });
-  }, [fetchMembers, fetchTodayDoses, memberId]);
+      if (selectedMemberRef.current !== nextMemberId) {
+        setSelectedMember(nextMemberId);
+        return;
+      }
+
+      void fetchTodayDoses(nextMemberId);
+    }
+
+    void refreshOnFocus();
+    return () => {
+      cancelled = true;
+    };
+  }, [ensureMembersLoaded, preferredMemberId, fetchTodayDoses]));
 
   function selectMember(id: string) {
+    setPreferredMemberId(null);
     setSelectedMember(id);
-    fetchTodayDoses(id);
   }
 
   async function handleMark(scheduleId: string, status: ScheduleStatus) {
@@ -69,11 +141,7 @@ export default function MedicationsTab() {
       {members.length > 1 && (
         <View style={styles.selectorSection}>
           <Text style={styles.selectorLabel}>Selecciona el familiar que quieres revisar</Text>
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={styles.memberTabs}
-          >
+          <View style={styles.memberTabs}>
             {members.map(m => {
               const isActive = selectedMember === m.id;
 
@@ -101,7 +169,7 @@ export default function MedicationsTab() {
                 </TouchableOpacity>
               );
             })}
-          </ScrollView>
+          </View>
         </View>
       )}
 
@@ -215,14 +283,13 @@ const styles = StyleSheet.create({
   memberTabs: {
     paddingHorizontal: Spacing.base,
     gap: Spacing.sm,
-    alignItems: 'center',
   },
   memberTab: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: Spacing.sm,
     minHeight: 68,
-    minWidth: 170,
+    width: '100%',
     paddingHorizontal: Spacing.md,
     paddingVertical: Spacing.sm,
     backgroundColor: Colors.surface,

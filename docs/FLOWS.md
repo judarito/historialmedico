@@ -158,6 +158,10 @@ const { data: visit } = await supabase
 - Las citas futuras generan un reminder automatico en `reminders` y lo veras luego en la campanita.
 - Desde el perfil del miembro, la acción `Dosis hoy` y el enlace `Ver todas las dosis` abren la pestaña de medicamentos enfocada en ese mismo familiar, no en el primero de la familia.
 - Las dosis pendientes tambien generan `reminders` de tipo `medication_dose`; cuando llega la hora, salen en la campanita y como push del celular.
+- En `Detalle de visita`, si esa visita tiene medicamentos o exámenes vinculados, ya se muestran ahí mismo y puedes completar un tratamiento o marcar un examen como realizado sin salir de la visita.
+- En `Detalle de visita`, las citas futuras se pueden reprogramar; el mismo modal también deja editar motivo de consulta y síntomas/observaciones.
+- En visitas actuales o pasadas, el diagnóstico se puede editar manualmente o inferir con IA desde ese modal, usando motivo, síntomas, medicamentos y exámenes como contexto.
+- Cuando la IA sugiere un diagnóstico en una visita o al procesar evidencia, intenta dejarlo como `Diagnóstico técnico (explicación sencilla)` para que el historial sea útil también para cuidadores.
 
 ## Flujo 4D: Limpiar informacion clinica de un familiar sin borrar su ficha
 

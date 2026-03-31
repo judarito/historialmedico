@@ -12,6 +12,8 @@ import {
   Image,
   Alert,
   Platform,
+  TextInput,
+  KeyboardAvoidingView,
 } from 'react-native';
 import { useLocalSearchParams, router, useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
@@ -19,10 +21,13 @@ import { Audio } from 'expo-av';
 import { supabase } from '../../../services/supabase';
 import { Colors, Typography, Spacing, Radius, Shadow } from '../../../theme';
 import type { Database } from '../../../types/database.types';
-import { formatCalendarDate } from '../../../utils';
+import { formatCalendarDate, toInputValue, toStoredIso } from '../../../utils';
+import { DatePickerField } from '../../../components/ui/DatePickerField';
 
 type MedicalVisit   = Database['public']['Tables']['medical_visits']['Row'];
 type MedicalDocument = Database['public']['Tables']['medical_documents']['Row'];
+type Prescription = Database['public']['Tables']['prescriptions']['Row'];
+type MedicalTest = Database['public']['Tables']['medical_tests']['Row'];
 type VisitStatus = Database['public']['Tables']['medical_visits']['Row']['status'];
 type DeleteAttachmentResult = {
   file_path?: string | null;
@@ -143,7 +148,10 @@ export default function VisitDetailRoute() {
   const { id } = useLocalSearchParams<{ id: string }>();
 
   const [visit,     setVisit]     = useState<MedicalVisit | null>(null);
+  const [visitMemberName, setVisitMemberName] = useState<string | null>(null);
   const [docs,      setDocs]      = useState<MedicalDocument[]>([]);
+  const [prescriptions, setPrescriptions] = useState<Prescription[]>([]);
+  const [tests, setTests] = useState<MedicalTest[]>([]);
   const [loading,   setLoading]   = useState(true);
   const [refreshing,setRefreshing]= useState(false);
   const [previewDoc, setPreviewDoc] = useState<MedicalDocument | null>(null);
@@ -156,6 +164,15 @@ export default function VisitDetailRoute() {
   const [deletingDocId, setDeletingDocId] = useState<string | null>(null);
   const [deletingVisit, setDeletingVisit] = useState(false);
   const [updatingStatus, setUpdatingStatus] = useState<VisitStatus | null>(null);
+  const [updatingPrescriptionId, setUpdatingPrescriptionId] = useState<string | null>(null);
+  const [updatingTestId, setUpdatingTestId] = useState<string | null>(null);
+  const [editModalVisible, setEditModalVisible] = useState(false);
+  const [editVisitDate, setEditVisitDate] = useState('');
+  const [editReasonForVisit, setEditReasonForVisit] = useState('');
+  const [editSymptoms, setEditSymptoms] = useState('');
+  const [editDiagnosis, setEditDiagnosis] = useState('');
+  const [savingVisitEdit, setSavingVisitEdit] = useState(false);
+  const [inferringDiagnosis, setInferringDiagnosis] = useState(false);
 
   // Recargar al volver del scan (después de adjuntar un documento)
   useFocusEffect(useCallback(() => { load(); }, [id]));
@@ -170,16 +187,46 @@ export default function VisitDetailRoute() {
 
   async function load() {
     if (!id) return;
-    const [visitRes, docsRes] = await Promise.all([
+    setVisitMemberName(null);
+    const [visitRes, docsRes, prescriptionsRes, testsRes] = await Promise.all([
       supabase.from('medical_visits').select('*').eq('id', id).is('deleted_at', null).single(),
       supabase
         .from('medical_documents')
         .select('*')
         .eq('medical_visit_id', id)
         .order('created_at', { ascending: false }),
+      supabase
+        .from('prescriptions')
+        .select('*')
+        .eq('medical_visit_id', id)
+        .order('created_at', { ascending: false }),
+      supabase
+        .from('medical_tests')
+        .select('*')
+        .eq('medical_visit_id', id)
+        .order('created_at', { ascending: false }),
     ]);
-    if (visitRes.data) setVisit(visitRes.data);
+    if (visitRes.data) {
+      setVisit(visitRes.data);
+
+      const { data: memberData } = await supabase
+        .from('family_members')
+        .select('first_name, last_name')
+        .eq('id', visitRes.data.family_member_id)
+        .single();
+
+      const fullName = [memberData?.first_name, memberData?.last_name]
+        .filter(Boolean)
+        .join(' ')
+        .trim();
+
+      setVisitMemberName(fullName || null);
+    } else {
+      setVisitMemberName(null);
+    }
     setDocs([...(docsRes.data ?? [])].sort(compareDocumentsByReferenceDate));
+    setPrescriptions(prescriptionsRes.data ?? []);
+    setTests(testsRes.data ?? []);
     setLoading(false);
     setRefreshing(false);
   }
@@ -191,6 +238,174 @@ export default function VisitDetailRoute() {
       params: {
         memberId: visit.family_member_id,
         visitId:  visit.id,
+      },
+    });
+  }
+
+  function openEditVisitModal() {
+    if (!visit) return;
+
+    setEditVisitDate(toInputValue(visit.visit_date, true) ?? '');
+    setEditReasonForVisit(visit.reason_for_visit ?? '');
+    setEditSymptoms(visit.notes ?? '');
+    setEditDiagnosis(visit.diagnosis ?? '');
+    setEditModalVisible(true);
+  }
+
+  function closeEditVisitModal() {
+    if (savingVisitEdit || inferringDiagnosis) return;
+    setEditModalVisible(false);
+  }
+
+  async function inferDiagnosisWithAI() {
+    if (!visit) return;
+
+    setInferringDiagnosis(true);
+    try {
+      const { data, error } = await supabase.functions.invoke('infer-visit-diagnosis', {
+        body: {
+          visit: {
+            doctor_name: visit.doctor_name,
+            specialty: visit.specialty,
+            institution_name: visit.institution_name,
+            reason_for_visit: editReasonForVisit.trim() || visit.reason_for_visit,
+            diagnosis: editDiagnosis.trim() || visit.diagnosis,
+            notes: editSymptoms.trim() || visit.notes,
+            vitals: {
+              weight_kg: visit.weight_kg,
+              height_cm: visit.height_cm,
+              temperature_c: visit.temperature_c,
+              blood_pressure: visit.blood_pressure,
+              heart_rate: visit.heart_rate,
+            },
+          },
+          prescriptions: prescriptions.map((item) => ({
+            medication_name: item.medication_name,
+            presentation: item.presentation,
+            dose_amount: item.dose_amount,
+            dose_unit: item.dose_unit,
+            frequency_text: item.frequency_text,
+            route: item.route,
+            instructions: item.instructions,
+          })),
+          tests: tests.map((item) => ({
+            test_name: item.test_name,
+            category: item.category,
+            notes: item.notes,
+          })),
+        },
+      });
+
+      if (error) {
+        showAlert('No se pudo inferir', error.message);
+        return;
+      }
+
+      const suggestedDiagnosis = typeof data?.diagnosis === 'string'
+        ? data.diagnosis.trim()
+        : '';
+
+      if (!suggestedDiagnosis) {
+        showAlert('Sin sugerencia', 'La IA no encontró suficiente contexto para proponer un diagnóstico confiable.');
+        return;
+      }
+
+      setEditDiagnosis(suggestedDiagnosis);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'No se pudo inferir el diagnóstico.';
+      showAlert('No se pudo inferir', message);
+    } finally {
+      setInferringDiagnosis(false);
+    }
+  }
+
+  async function saveVisitEdit() {
+    if (!visit) return;
+
+    const canEditVisitDate = visit.status === 'scheduled';
+    const canEditDiagnosis = visit.status !== 'scheduled';
+    const updates: Database['public']['Tables']['medical_visits']['Update'] = {};
+    const normalizedReason = editReasonForVisit.trim();
+    const normalizedSymptoms = editSymptoms.trim();
+    const currentReason = (visit.reason_for_visit ?? '').trim();
+    const currentSymptoms = (visit.notes ?? '').trim();
+
+    if (canEditVisitDate) {
+      if (!editVisitDate) {
+        showAlert('Fecha requerida', 'Selecciona la nueva fecha de la cita.');
+        return;
+      }
+
+      const storedVisitDate = toStoredIso(editVisitDate, true);
+      if (!storedVisitDate) {
+        showAlert('Fecha inválida', 'La nueva fecha de la cita no es válida.');
+        return;
+      }
+
+      if (new Date(storedVisitDate).getTime() <= Date.now()) {
+        showAlert('Fecha inválida', 'La cita debe mantenerse en una fecha futura.');
+        return;
+      }
+
+      updates.visit_date = storedVisitDate;
+    }
+
+    if (canEditDiagnosis) {
+      const trimmedDiagnosis = editDiagnosis.trim();
+      const currentDiagnosis = (visit.diagnosis ?? '').trim();
+      if (!trimmedDiagnosis && currentDiagnosis) {
+        showAlert('Diagnóstico requerido', 'Si quieres cambiarlo, escribe un diagnóstico o usa "Inferir con IA".');
+        return;
+      }
+      if (trimmedDiagnosis && trimmedDiagnosis !== currentDiagnosis) {
+        updates.diagnosis = trimmedDiagnosis;
+      }
+    }
+
+    if (normalizedReason !== currentReason) {
+      updates.reason_for_visit = normalizedReason || null;
+    }
+
+    if (normalizedSymptoms !== currentSymptoms) {
+      updates.notes = normalizedSymptoms || null;
+    }
+
+    if (Object.keys(updates).length === 0) {
+      setEditModalVisible(false);
+      return;
+    }
+
+    setSavingVisitEdit(true);
+    try {
+      const { error } = await supabase
+        .from('medical_visits')
+        .update(updates)
+        .eq('id', visit.id);
+
+      if (error) {
+        showAlert('No se pudo actualizar', error.message);
+        return;
+      }
+
+      setVisit((current) => current ? { ...current, ...updates } : current);
+      setEditModalVisible(false);
+      showAlert('Visita actualizada', canEditVisitDate
+        ? 'La cita fue actualizada. Si cambiaste la fecha, sus recordatorios se sincronizarán automáticamente.'
+        : 'Los cambios de la visita fueron guardados.');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'No se pudo actualizar la visita.';
+      showAlert('No se pudo actualizar', message);
+    } finally {
+      setSavingVisitEdit(false);
+    }
+  }
+
+  function openMemberMedicationTimeline() {
+    if (!visit) return;
+    router.push({
+      pathname: '/(app)/(tabs)/medications',
+      params: {
+        memberId: visit.family_member_id,
       },
     });
   }
@@ -233,6 +448,108 @@ export default function VisitDetailRoute() {
       confirmLabel: 'Cancelar cita',
       onConfirm: () => { void updateVisitStatus('cancelled'); },
     });
+  }
+
+  function confirmCompletePrescription(prescription: Prescription) {
+    showConfirm({
+      title: 'Completar tratamiento',
+      message: 'El medicamento dejará de aparecer como activo y sus dosis pendientes futuras se cancelarán.',
+      confirmLabel: 'Completar',
+      confirmStyle: 'default',
+      onConfirm: () => { void completePrescription(prescription); },
+    });
+  }
+
+  async function completePrescription(prescription: Prescription) {
+    setUpdatingPrescriptionId(prescription.id);
+    try {
+      const completedAt = new Date().toISOString();
+      const [{ error: prescriptionError }, { error: schedulesError }] = await Promise.all([
+        supabase
+          .from('prescriptions')
+          .update({
+            status: 'completed',
+            end_at: completedAt,
+          })
+          .eq('id', prescription.id),
+        supabase
+          .from('medication_schedules')
+          .update({ status: 'cancelled' })
+          .eq('prescription_id', prescription.id)
+          .in('status', ['pending', 'late']),
+      ]);
+
+      if (prescriptionError || schedulesError) {
+        throw prescriptionError ?? schedulesError;
+      }
+
+      setPrescriptions((current) => current.map((item) => (
+        item.id === prescription.id
+          ? { ...item, status: 'completed', end_at: completedAt }
+          : item
+      )));
+
+      showAlert(
+        'Tratamiento completado',
+        'El medicamento ya no aparecerá como activo y sus dosis pendientes futuras se cancelaron.'
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'No se pudo completar el tratamiento.';
+      showAlert('No se pudo actualizar', message);
+    } finally {
+      setUpdatingPrescriptionId(null);
+    }
+  }
+
+  function confirmCompleteTest(test: MedicalTest) {
+    showConfirm({
+      title: 'Marcar examen como realizado',
+      message: 'El examen pasará a completado y dejará de aparecer como pendiente en la familia.',
+      confirmLabel: 'Marcar',
+      confirmStyle: 'default',
+      onConfirm: () => { void completeTest(test); },
+    });
+  }
+
+  async function completeTest(test: MedicalTest) {
+    setUpdatingTestId(test.id);
+    try {
+      const completedAt = new Date().toISOString();
+      const [{ error: testError }, { error: reminderError }] = await Promise.all([
+        supabase
+          .from('medical_tests')
+          .update({
+            status: 'completed',
+            completed_at: completedAt,
+          })
+          .eq('id', test.id),
+        supabase
+          .from('reminders')
+          .update({
+            status: 'dismissed',
+            read_at: completedAt,
+          })
+          .eq('medical_test_id', test.id)
+          .in('status', ['pending', 'sent', 'read', 'failed']),
+      ]);
+
+      if (testError || reminderError) {
+        throw testError ?? reminderError;
+      }
+
+      setTests((current) => current.map((item) => (
+        item.id === test.id
+          ? { ...item, status: 'completed', completed_at: completedAt }
+          : item
+      )));
+
+      showAlert('Examen actualizado', 'El examen quedó marcado como realizado.');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'No se pudo actualizar el examen.';
+      showAlert('No se pudo actualizar', message);
+    } finally {
+      setUpdatingTestId(null);
+    }
   }
 
   async function releaseAudioPlayer() {
@@ -693,6 +1010,11 @@ export default function VisitDetailRoute() {
   const visitStatusMeta = getVisitStatusMeta(visit.status);
   const isScheduledVisit = visit.status === 'scheduled';
   const isCancelledVisit = visit.status === 'cancelled';
+  const visitHeaderContext = [visitMemberName, visit.doctor_name].filter(Boolean).join(' · ') || 'Sin familiar asignado';
+  const canEditVisitDate = visit.status === 'scheduled';
+  const canEditDiagnosis = visit.status !== 'scheduled';
+  const canEditVisit = true;
+  const editVisitLabel = isScheduledVisit ? 'Editar cita' : 'Editar visita';
 
   return (
     <SafeAreaView style={styles.safe}>
@@ -704,7 +1026,7 @@ export default function VisitDetailRoute() {
         <View style={styles.headerCenter}>
           <Text style={styles.headerTitle}>{isScheduledVisit ? 'Detalle de cita' : 'Detalle de visita'}</Text>
           <Text style={styles.headerSub} numberOfLines={1}>
-            {visit.doctor_name ?? 'Sin médico'}
+            {visitHeaderContext}
           </Text>
         </View>
         <View style={styles.headerActions}>
@@ -755,11 +1077,28 @@ export default function VisitDetailRoute() {
                 {visitStatusMeta.label}
               </Text>
             </View>
+            {canEditVisit && (
+              <TouchableOpacity
+                style={styles.editVisitBtn}
+                onPress={openEditVisitModal}
+                activeOpacity={0.8}
+              >
+                <Ionicons
+                  name={canEditVisitDate ? 'calendar-outline' : 'create-outline'}
+                  size={14}
+                  color={Colors.primary}
+                />
+                <Text style={styles.editVisitBtnText}>{editVisitLabel}</Text>
+              </TouchableOpacity>
+            )}
           </View>
 
           <View style={styles.divider} />
 
           {/* Campos informativos */}
+          {visitMemberName && (
+            <InfoRow icon="people-outline" label="Familiar" value={visitMemberName} />
+          )}
           {visit.doctor_name && (
             <InfoRow icon="person-outline" label="Médico" value={visit.doctor_name} />
           )}
@@ -770,13 +1109,13 @@ export default function VisitDetailRoute() {
             <InfoRow icon="business-outline" label="Institución" value={visit.institution_name} />
           )}
           {visit.reason_for_visit && (
-            <InfoRow icon="help-circle-outline" label="Motivo" value={visit.reason_for_visit} />
+            <InfoRow icon="help-circle-outline" label="Motivo de consulta" value={visit.reason_for_visit} />
           )}
           {visit.diagnosis && (
             <InfoRow icon="document-text-outline" label="Diagnóstico" value={visit.diagnosis} multiline />
           )}
           {visit.notes && (
-            <InfoRow icon="chatbox-ellipses-outline" label="Notas" value={visit.notes} multiline />
+            <InfoRow icon="chatbox-ellipses-outline" label="Síntomas / notas" value={visit.notes} multiline />
           )}
         </View>
 
@@ -851,6 +1190,121 @@ export default function VisitDetailRoute() {
                 <VitalChip icon="heart-outline" label="FC" value={`${visit.heart_rate} lpm`} />
               )}
             </View>
+          </View>
+        )}
+
+        {(prescriptions.length > 0 || tests.length > 0) && (
+          <View style={styles.section}>
+            {prescriptions.length > 0 && (
+              <View style={styles.relatedSectionCard}>
+                <View style={styles.sectionHeader}>
+                  <Text style={styles.sectionTitle}>Medicamentos de esta visita ({prescriptions.length})</Text>
+                  <TouchableOpacity onPress={openMemberMedicationTimeline} activeOpacity={0.8}>
+                    <Text style={styles.sectionLink}>Dosis hoy</Text>
+                  </TouchableOpacity>
+                </View>
+
+                <View style={styles.relatedList}>
+                  {prescriptions.map((prescription) => {
+                    const statusMeta = getPrescriptionStatusMeta(prescription.status);
+                    const isActivePrescription = prescription.status === 'active';
+
+                    return (
+                      <View key={prescription.id} style={styles.relatedItemCard}>
+                        <View style={styles.relatedItemTopRow}>
+                          <View style={styles.relatedItemCopy}>
+                            <Text style={styles.relatedItemTitle}>{prescription.medication_name}</Text>
+                            <Text style={styles.relatedItemMeta}>
+                              {formatPrescriptionSummary(prescription)}
+                            </Text>
+                            {prescription.instructions ? (
+                              <Text style={styles.relatedItemSubtle}>{prescription.instructions}</Text>
+                            ) : null}
+                          </View>
+
+                          <View style={[styles.inlineStatusBadge, { backgroundColor: statusMeta.backgroundColor }]}>
+                            <Text style={[styles.inlineStatusText, { color: statusMeta.color }]}>
+                              {statusMeta.label}
+                            </Text>
+                          </View>
+                        </View>
+
+                        {isActivePrescription ? (
+                          <TouchableOpacity
+                            style={styles.inlineActionBtn}
+                            onPress={() => confirmCompletePrescription(prescription)}
+                            disabled={updatingPrescriptionId === prescription.id}
+                            activeOpacity={0.8}
+                          >
+                            {updatingPrescriptionId === prescription.id ? (
+                              <ActivityIndicator color={Colors.white} size="small" />
+                            ) : (
+                              <>
+                                <Ionicons name="checkmark-circle-outline" size={16} color={Colors.white} />
+                                <Text style={styles.inlineActionText}>Completar tratamiento</Text>
+                              </>
+                            )}
+                          </TouchableOpacity>
+                        ) : null}
+                      </View>
+                    );
+                  })}
+                </View>
+              </View>
+            )}
+
+            {tests.length > 0 && (
+              <View style={styles.relatedSectionCard}>
+                <View style={styles.sectionHeader}>
+                  <Text style={styles.sectionTitle}>Exámenes de esta visita ({tests.length})</Text>
+                </View>
+
+                <View style={styles.relatedList}>
+                  {tests.map((test) => {
+                    const statusMeta = getTestStatusMeta(test.status);
+                    const isPendingTest = test.status === 'pending' || test.status === 'scheduled';
+
+                    return (
+                      <View key={test.id} style={styles.relatedItemCard}>
+                        <View style={styles.relatedItemTopRow}>
+                          <View style={styles.relatedItemCopy}>
+                            <Text style={styles.relatedItemTitle}>{test.test_name}</Text>
+                            <Text style={styles.relatedItemMeta}>{formatTestSummary(test)}</Text>
+                            {test.notes ? (
+                              <Text style={styles.relatedItemSubtle}>{test.notes}</Text>
+                            ) : null}
+                          </View>
+
+                          <View style={[styles.inlineStatusBadge, { backgroundColor: statusMeta.backgroundColor }]}>
+                            <Text style={[styles.inlineStatusText, { color: statusMeta.color }]}>
+                              {statusMeta.label}
+                            </Text>
+                          </View>
+                        </View>
+
+                        {isPendingTest ? (
+                          <TouchableOpacity
+                            style={[styles.inlineActionBtn, styles.inlineActionBtnSecondary]}
+                            onPress={() => confirmCompleteTest(test)}
+                            disabled={updatingTestId === test.id}
+                            activeOpacity={0.8}
+                          >
+                            {updatingTestId === test.id ? (
+                              <ActivityIndicator color={Colors.primary} size="small" />
+                            ) : (
+                              <>
+                                <Ionicons name="flask-outline" size={16} color={Colors.primary} />
+                                <Text style={styles.inlineActionTextSecondary}>Marcar como realizado</Text>
+                              </>
+                            )}
+                          </TouchableOpacity>
+                        ) : null}
+                      </View>
+                    );
+                  })}
+                </View>
+              </View>
+            )}
           </View>
         )}
 
@@ -945,6 +1399,139 @@ export default function VisitDetailRoute() {
 
         <View style={{ height: Spacing.xxxl }} />
       </ScrollView>
+
+      <Modal
+        visible={editModalVisible}
+        animationType="slide"
+        transparent
+        onRequestClose={closeEditVisitModal}
+      >
+        <KeyboardAvoidingView
+          style={styles.editOverlay}
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        >
+          <View style={styles.editSheet}>
+            <View style={styles.previewHeader}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.previewTitle}>
+                  {isScheduledVisit ? 'Editar cita' : 'Editar visita'}
+                </Text>
+                <Text style={styles.previewSubtitle}>
+                  {visitMemberName ?? 'Visita médica'}
+                </Text>
+              </View>
+              <TouchableOpacity style={styles.backBtn} onPress={closeEditVisitModal} disabled={savingVisitEdit}>
+                <Ionicons name="close" size={22} color={Colors.textPrimary} />
+              </TouchableOpacity>
+            </View>
+
+            <ScrollView
+              contentContainerStyle={styles.editContent}
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator={false}
+            >
+              {canEditVisitDate && (
+                <>
+                  <Text style={styles.editHelperText}>
+                    Cambia la fecha de la cita futura. El sistema actualizará sus recordatorios automáticamente.
+                  </Text>
+                  <DatePickerField
+                    label="Nueva fecha de la cita"
+                    value={editVisitDate}
+                    onChange={setEditVisitDate}
+                    withTime
+                    minimumDate={new Date()}
+                  />
+                </>
+              )}
+
+              <View style={styles.editField}>
+                <Text style={styles.editFieldLabel}>Motivo de consulta</Text>
+                <TextInput
+                  style={styles.editFieldInputCompact}
+                  value={editReasonForVisit}
+                  onChangeText={setEditReasonForVisit}
+                  placeholder="Ej: tos persistente, control pediátrico"
+                  placeholderTextColor={Colors.textMuted}
+                  multiline
+                  textAlignVertical="top"
+                />
+              </View>
+
+              <View style={styles.editField}>
+                <Text style={styles.editFieldLabel}>Síntomas u observaciones</Text>
+                <TextInput
+                  style={styles.editFieldInput}
+                  value={editSymptoms}
+                  onChangeText={setEditSymptoms}
+                  placeholder="Ej: fiebre, dolor de oído, congestión..."
+                  placeholderTextColor={Colors.textMuted}
+                  multiline
+                  textAlignVertical="top"
+                />
+              </View>
+
+              {canEditDiagnosis && (
+                <View style={styles.editField}>
+                  <View style={styles.editFieldHeader}>
+                    <Text style={styles.editFieldLabel}>Diagnóstico</Text>
+                    <TouchableOpacity
+                      style={[styles.inferDiagnosisBtn, inferringDiagnosis && { opacity: 0.7 }]}
+                      onPress={() => { void inferDiagnosisWithAI(); }}
+                      disabled={inferringDiagnosis || savingVisitEdit}
+                      activeOpacity={0.8}
+                    >
+                      {inferringDiagnosis ? (
+                        <ActivityIndicator color={Colors.primary} size="small" />
+                      ) : (
+                        <>
+                          <Ionicons name="sparkles-outline" size={14} color={Colors.primary} />
+                          <Text style={styles.inferDiagnosisBtnText}>Inferir con IA</Text>
+                        </>
+                      )}
+                    </TouchableOpacity>
+                  </View>
+                  <TextInput
+                    style={styles.editFieldInput}
+                    value={editDiagnosis}
+                    onChangeText={setEditDiagnosis}
+                    placeholder="Escribe el diagnóstico clínico"
+                    placeholderTextColor={Colors.textMuted}
+                    multiline
+                    textAlignVertical="top"
+                  />
+                  <Text style={styles.editHelperText}>
+                    Este diagnóstico se mostrará en historial, búsquedas y detalle de la visita. La IA toma en cuenta motivo, síntomas, medicamentos y exámenes para inferir uno técnico con una explicación sencilla.
+                  </Text>
+                </View>
+              )}
+            </ScrollView>
+
+            <View style={styles.editActions}>
+              <TouchableOpacity
+                style={styles.editCancelBtn}
+                onPress={closeEditVisitModal}
+                disabled={savingVisitEdit}
+                activeOpacity={0.8}
+              >
+                <Text style={styles.editCancelBtnText}>Cancelar</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.editSaveBtn, savingVisitEdit && { opacity: 0.7 }]}
+                onPress={() => { void saveVisitEdit(); }}
+                disabled={savingVisitEdit}
+                activeOpacity={0.8}
+              >
+                {savingVisitEdit ? (
+                  <ActivityIndicator color={Colors.white} size="small" />
+                ) : (
+                  <Text style={styles.editSaveBtnText}>Guardar cambios</Text>
+                )}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
 
       <Modal
         visible={!!previewDoc}
@@ -1073,6 +1660,96 @@ function VitalChip({ icon, label, value, color }: {
   );
 }
 
+function getPrescriptionStatusMeta(status: Prescription['status']) {
+  switch (status) {
+    case 'active':
+      return {
+        label: 'Activo',
+        color: Colors.healthy,
+        backgroundColor: Colors.healthyBg,
+      };
+    case 'paused':
+      return {
+        label: 'Pausado',
+        color: Colors.warning,
+        backgroundColor: Colors.warningBg,
+      };
+    case 'cancelled':
+      return {
+        label: 'Cancelado',
+        color: Colors.alert,
+        backgroundColor: Colors.alertBg,
+      };
+    default:
+      return {
+        label: 'Completado',
+        color: Colors.textSecondary,
+        backgroundColor: Colors.surfaceHigh,
+      };
+  }
+}
+
+function getTestStatusMeta(status: MedicalTest['status']) {
+  switch (status) {
+    case 'pending':
+      return {
+        label: 'Pendiente',
+        color: Colors.warning,
+        backgroundColor: Colors.warningBg,
+      };
+    case 'scheduled':
+      return {
+        label: 'Programado',
+        color: Colors.info,
+        backgroundColor: Colors.infoBg,
+      };
+    case 'result_uploaded':
+      return {
+        label: 'Resultado',
+        color: Colors.primary,
+        backgroundColor: Colors.infoBg,
+      };
+    case 'cancelled':
+      return {
+        label: 'Cancelado',
+        color: Colors.alert,
+        backgroundColor: Colors.alertBg,
+      };
+    default:
+      return {
+        label: 'Completado',
+        color: Colors.healthy,
+        backgroundColor: Colors.healthyBg,
+      };
+  }
+}
+
+function formatPrescriptionSummary(prescription: Prescription) {
+  const parts = [
+    prescription.dose_amount != null
+      ? `${prescription.dose_amount} ${prescription.dose_unit ?? ''}`.trim()
+      : null,
+    prescription.frequency_text,
+    prescription.route,
+  ].filter(Boolean);
+
+  return parts.join(' · ') || 'Sin detalle de dosis';
+}
+
+function formatTestSummary(test: MedicalTest) {
+  const when = test.due_at ?? test.scheduled_at ?? test.ordered_at ?? test.completed_at;
+  const whenLabel = when
+    ? formatCalendarDate(when)
+    : null;
+
+  const parts = [
+    test.category,
+    whenLabel,
+  ].filter(Boolean);
+
+  return parts.join(' · ') || 'Sin fecha clínica registrada';
+}
+
 // ── Styles ───────────────────────────────────────────────────────────────────
 
 const styles = StyleSheet.create({
@@ -1119,7 +1796,13 @@ const styles = StyleSheet.create({
   },
   dateMain: { color: Colors.textPrimary,   fontSize: Typography.base, fontWeight: Typography.semibold, textTransform: 'capitalize' },
   dateSub:  { color: Colors.textSecondary, fontSize: Typography.xs },
-  visitStatusRow: { marginTop: Spacing.sm },
+  visitStatusRow: {
+    marginTop: Spacing.sm,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: Spacing.sm,
+  },
   visitStatusBadge: {
     alignSelf: 'flex-start',
     flexDirection: 'row',
@@ -1130,6 +1813,22 @@ const styles = StyleSheet.create({
     paddingVertical: 5,
   },
   visitStatusText: { fontSize: Typography.xs, fontWeight: Typography.semibold },
+  editVisitBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    borderRadius: Radius.full,
+    borderWidth: 1,
+    borderColor: Colors.primary + '44',
+    backgroundColor: Colors.primary + '12',
+    paddingHorizontal: Spacing.sm,
+    paddingVertical: 6,
+  },
+  editVisitBtnText: {
+    color: Colors.primary,
+    fontSize: Typography.xs,
+    fontWeight: Typography.semibold,
+  },
   divider:  { height: 1, backgroundColor: Colors.border, marginVertical: 4 },
   infoRow:  { flexDirection: 'row', alignItems: 'flex-start', gap: Spacing.sm },
   infoIcon: { marginTop: 3 },
@@ -1142,9 +1841,197 @@ const styles = StyleSheet.create({
   sectionTitle:  { color: Colors.textPrimary, fontSize: Typography.md, fontWeight: Typography.bold },
   addDocBtn:     { flexDirection: 'row', alignItems: 'center', gap: 4 },
   addDocText:    { color: Colors.primary, fontSize: Typography.sm, fontWeight: Typography.semibold },
+  sectionLink:   { color: Colors.primaryLight, fontSize: Typography.sm, fontWeight: Typography.semibold },
 
   vitalsGrid: {
     flexDirection: 'row', flexWrap: 'wrap', gap: Spacing.sm,
+  },
+  relatedSectionCard: {
+    backgroundColor: Colors.surface,
+    borderRadius: Radius.xl,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    padding: Spacing.md,
+    gap: Spacing.sm,
+  },
+  relatedList: {
+    gap: Spacing.sm,
+  },
+  relatedItemCard: {
+    backgroundColor: Colors.background,
+    borderRadius: Radius.lg,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    padding: Spacing.md,
+    gap: Spacing.sm,
+  },
+  relatedItemTopRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: Spacing.sm,
+  },
+  relatedItemCopy: {
+    flex: 1,
+    gap: 4,
+  },
+  relatedItemTitle: {
+    color: Colors.textPrimary,
+    fontSize: Typography.sm,
+    fontWeight: Typography.semibold,
+  },
+  relatedItemMeta: {
+    color: Colors.textSecondary,
+    fontSize: Typography.xs,
+  },
+  relatedItemSubtle: {
+    color: Colors.textMuted,
+    fontSize: Typography.xs,
+    lineHeight: 18,
+  },
+  inlineStatusBadge: {
+    borderRadius: Radius.full,
+    paddingHorizontal: Spacing.sm,
+    paddingVertical: 5,
+  },
+  inlineStatusText: {
+    fontSize: Typography.xs,
+    fontWeight: Typography.semibold,
+  },
+  inlineActionBtn: {
+    minHeight: 40,
+    borderRadius: Radius.md,
+    backgroundColor: Colors.healthy,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexDirection: 'row',
+    gap: Spacing.xs,
+    paddingHorizontal: Spacing.md,
+  },
+  inlineActionBtnSecondary: {
+    backgroundColor: Colors.infoBg,
+    borderWidth: 1,
+    borderColor: Colors.primary + '33',
+  },
+  inlineActionText: {
+    color: Colors.white,
+    fontSize: Typography.sm,
+    fontWeight: Typography.semibold,
+  },
+  inlineActionTextSecondary: {
+    color: Colors.primary,
+    fontSize: Typography.sm,
+    fontWeight: Typography.semibold,
+  },
+  editOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.6)',
+    justifyContent: 'flex-end',
+  },
+  editSheet: {
+    backgroundColor: Colors.background,
+    borderTopLeftRadius: Radius.xl,
+    borderTopRightRadius: Radius.xl,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    maxHeight: '85%',
+    paddingBottom: Spacing.lg,
+  },
+  editContent: {
+    paddingHorizontal: Spacing.base,
+    paddingBottom: Spacing.base,
+    gap: Spacing.base,
+  },
+  editField: {
+    gap: Spacing.sm,
+  },
+  editFieldHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: Spacing.sm,
+  },
+  editFieldLabel: {
+    color: Colors.textSecondary,
+    fontSize: Typography.sm,
+    fontWeight: Typography.medium,
+  },
+  inferDiagnosisBtn: {
+    minHeight: 34,
+    borderRadius: Radius.full,
+    borderWidth: 1,
+    borderColor: Colors.primary + '44',
+    backgroundColor: Colors.primary + '12',
+    paddingHorizontal: Spacing.sm,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+  },
+  inferDiagnosisBtnText: {
+    color: Colors.primary,
+    fontSize: Typography.xs,
+    fontWeight: Typography.semibold,
+  },
+  editFieldInput: {
+    minHeight: 120,
+    borderRadius: Radius.lg,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    backgroundColor: Colors.surface,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.md,
+    color: Colors.textPrimary,
+    fontSize: Typography.base,
+  },
+  editFieldInputCompact: {
+    minHeight: 68,
+    borderRadius: Radius.lg,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    backgroundColor: Colors.surface,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.md,
+    color: Colors.textPrimary,
+    fontSize: Typography.base,
+  },
+  editHelperText: {
+    color: Colors.textSecondary,
+    fontSize: Typography.xs,
+    lineHeight: 18,
+  },
+  editActions: {
+    flexDirection: 'row',
+    gap: Spacing.sm,
+    paddingHorizontal: Spacing.base,
+    paddingTop: Spacing.sm,
+  },
+  editCancelBtn: {
+    flex: 1,
+    minHeight: 48,
+    borderRadius: Radius.lg,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    backgroundColor: Colors.surface,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  editCancelBtnText: {
+    color: Colors.textPrimary,
+    fontSize: Typography.sm,
+    fontWeight: Typography.semibold,
+  },
+  editSaveBtn: {
+    flex: 1,
+    minHeight: 48,
+    borderRadius: Radius.lg,
+    backgroundColor: Colors.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  editSaveBtnText: {
+    color: Colors.white,
+    fontSize: Typography.sm,
+    fontWeight: Typography.semibold,
   },
   scheduledActions: { gap: Spacing.sm },
   statusActionBtn: {

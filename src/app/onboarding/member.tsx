@@ -9,6 +9,8 @@ import {
   ScrollView,
   Alert,
   ActivityIndicator,
+  KeyboardAvoidingView,
+  Platform,
 } from 'react-native';
 import { router } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
@@ -114,8 +116,9 @@ export default function OnboardingAddMember() {
 
   return (
     <SafeAreaView style={styles.safe}>
-      <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
-        <View style={styles.titleBlock}>
+      <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+        <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
+          <View style={styles.titleBlock}>
           <Ionicons name="person-add" size={40} color={Colors.primary} style={{ marginBottom: Spacing.md }} />
           <Text style={styles.title}>Agrega el primer miembro</Text>
           <Text style={styles.subtitle}>Puedes agregar más miembros después desde la app.</Text>
@@ -184,8 +187,9 @@ export default function OnboardingAddMember() {
           }
         </TouchableOpacity>
 
-        <View style={{ height: Spacing.xxxl }} />
-      </ScrollView>
+          <View style={{ height: Spacing.xxxl }} />
+        </ScrollView>
+      </KeyboardAvoidingView>
     </SafeAreaView>
   );
 }
@@ -218,6 +222,7 @@ function Field({ label, value, onChangeText, placeholder, error, keyboardType, a
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: Colors.background },
+  flex: { flex: 1 },
   loadingState: {
     flex: 1,
     alignItems: 'center',
@@ -230,7 +235,7 @@ const styles = StyleSheet.create({
     fontSize: Typography.base,
     textAlign: 'center',
   },
-  content: { paddingHorizontal: Spacing.xl, paddingTop: Spacing.xxl, gap: Spacing.lg },
+  content: { flexGrow: 1, paddingHorizontal: Spacing.xl, paddingTop: Spacing.xxl, gap: Spacing.lg },
   titleBlock: { alignItems: 'center', marginBottom: Spacing.md },
   title: { color: Colors.textPrimary, fontSize: Typography.xl, fontWeight: Typography.bold, textAlign: 'center', marginBottom: 6 },
   subtitle: { color: Colors.textSecondary, fontSize: Typography.sm, textAlign: 'center' },

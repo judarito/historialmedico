@@ -10,6 +10,8 @@ import {
   Alert,
   ActivityIndicator,
   Image,
+  KeyboardAvoidingView,
+  Platform,
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import { useLocalSearchParams, router } from 'expo-router';
@@ -167,7 +169,11 @@ export default function EditMemberRoute() {
         <View style={{ width: 38 }} />
       </View>
 
-      <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
+      <KeyboardAvoidingView
+        style={styles.formWrapper}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      >
+        <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
 
         {/* Avatar */}
         <View style={styles.avatarSection}>
@@ -261,7 +267,8 @@ export default function EditMemberRoute() {
         </TouchableOpacity>
 
         <View style={{ height: Spacing.xxxl }} />
-      </ScrollView>
+        </ScrollView>
+      </KeyboardAvoidingView>
     </SafeAreaView>
   );
 }
@@ -303,6 +310,7 @@ const styles = StyleSheet.create({
   headerTitle: { color: Colors.textPrimary, fontSize: Typography.lg, fontWeight: Typography.bold },
   headerSub: { color: Colors.textSecondary, fontSize: Typography.sm },
 
+  formWrapper: { flex: 1 },
   content: { paddingHorizontal: Spacing.base, paddingTop: Spacing.xl, gap: Spacing.md },
 
   avatarSection: { alignItems: 'center', gap: Spacing.sm, marginBottom: Spacing.sm },

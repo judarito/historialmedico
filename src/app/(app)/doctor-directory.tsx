@@ -9,6 +9,8 @@ import {
   ActivityIndicator,
   ScrollView,
   Linking,
+  KeyboardAvoidingView,
+  Platform,
 } from 'react-native';
 import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
@@ -372,20 +374,21 @@ export default function DoctorDirectoryScreen() {
 
   return (
     <SafeAreaView style={styles.safe}>
-      <View style={styles.header}>
-        <TouchableOpacity style={styles.backBtn} onPress={() => router.back()}>
-          <Ionicons name="arrow-back" size={22} color={Colors.textPrimary} />
-        </TouchableOpacity>
-      <View style={styles.headerText}>
-        <Text style={styles.title}>Especialistas</Text>
-        <Text style={styles.subtitle}>
-          {openFavoritesDirectly ? 'Tus especialistas guardados' : 'Google Places + cache compartido'}
-        </Text>
-      </View>
-      </View>
+      <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+        <View style={styles.header}>
+          <TouchableOpacity style={styles.backBtn} onPress={() => router.back()}>
+            <Ionicons name="arrow-back" size={22} color={Colors.textPrimary} />
+          </TouchableOpacity>
+          <View style={styles.headerText}>
+            <Text style={styles.title}>Especialistas</Text>
+            <Text style={styles.subtitle}>
+              {openFavoritesDirectly ? 'Tus especialistas guardados' : 'Google Places + cache compartido'}
+            </Text>
+          </View>
+        </View>
 
-      <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
-        <View style={styles.searchCard}>
+        <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
+          <View style={styles.searchCard}>
           <Text style={styles.label}>¿Qué estás buscando?</Text>
           <View style={styles.searchInputWrap}>
             <Ionicons name="search-outline" size={18} color={Colors.textMuted} />
@@ -579,14 +582,16 @@ export default function DoctorDirectoryScreen() {
           </TouchableOpacity>
         )}
 
-        <View style={{ height: Spacing.xxxl }} />
-      </ScrollView>
+          <View style={{ height: Spacing.xxxl }} />
+        </ScrollView>
+      </KeyboardAvoidingView>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: Colors.background },
+  flex: { flex: 1 },
   header: {
     flexDirection: 'row',
     alignItems: 'center',

@@ -10,6 +10,8 @@ import {
   Alert,
   ActivityIndicator,
   Modal,
+  KeyboardAvoidingView,
+  Platform,
 } from 'react-native';
 import { router } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
@@ -97,25 +99,37 @@ export default function FamilyTab() {
       {/* Modal agregar miembro */}
       <Modal visible={showAdd} animationType="slide" transparent>
         <View style={styles.modalOverlay}>
-          <View style={styles.modalBox}>
-            <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>Nuevo miembro</Text>
-              <TouchableOpacity onPress={() => setShowAdd(false)}>
-                <Ionicons name="close" size={22} color={Colors.textSecondary} />
-              </TouchableOpacity>
-            </View>
-
-            <MiniField label="Nombre *" value={firstName} onChangeText={setFirstName} placeholder="Juan" autoCapitalize="words" />
-            <MiniField label="Apellido" value={lastName} onChangeText={setLastName} placeholder="García" autoCapitalize="words" />
-            <MiniField label="Fecha nacimiento * (AAAA-MM-DD)" value={birthDate} onChangeText={setBirthDate} placeholder="1990-05-21" keyboardType="numeric" />
-
-            <TouchableOpacity
-              style={[styles.modalBtn, saving && { opacity: 0.6 }]}
-              onPress={handleAdd} disabled={saving} activeOpacity={0.8}
+          <KeyboardAvoidingView
+            style={styles.modalKeyboard}
+            behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+          >
+            <ScrollView
+              style={styles.modalScroll}
+              contentContainerStyle={styles.modalScrollContent}
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator={false}
             >
-              {saving ? <ActivityIndicator color={Colors.white} /> : <Text style={styles.modalBtnText}>Agregar</Text>}
-            </TouchableOpacity>
-          </View>
+              <View style={styles.modalBox}>
+                <View style={styles.modalHeader}>
+                  <Text style={styles.modalTitle}>Nuevo miembro</Text>
+                  <TouchableOpacity onPress={() => setShowAdd(false)}>
+                    <Ionicons name="close" size={22} color={Colors.textSecondary} />
+                  </TouchableOpacity>
+                </View>
+
+                <MiniField label="Nombre *" value={firstName} onChangeText={setFirstName} placeholder="Juan" autoCapitalize="words" />
+                <MiniField label="Apellido" value={lastName} onChangeText={setLastName} placeholder="García" autoCapitalize="words" />
+                <MiniField label="Fecha nacimiento * (AAAA-MM-DD)" value={birthDate} onChangeText={setBirthDate} placeholder="1990-05-21" keyboardType="numeric" />
+
+                <TouchableOpacity
+                  style={[styles.modalBtn, saving && { opacity: 0.6 }]}
+                  onPress={handleAdd} disabled={saving} activeOpacity={0.8}
+                >
+                  {saving ? <ActivityIndicator color={Colors.white} /> : <Text style={styles.modalBtnText}>Agregar</Text>}
+                </TouchableOpacity>
+              </View>
+            </ScrollView>
+          </KeyboardAvoidingView>
         </View>
       </Modal>
     </SafeAreaView>
@@ -173,6 +187,9 @@ const styles = StyleSheet.create({
 
   // Modal
   modalOverlay: { flex: 1, backgroundColor: '#000000AA', justifyContent: 'flex-end' },
+  modalKeyboard: { flex: 1, justifyContent: 'flex-end' },
+  modalScroll: { flexGrow: 0 },
+  modalScrollContent: { justifyContent: 'flex-end' },
   modalBox: {
     backgroundColor: Colors.surface, borderTopLeftRadius: Radius.xl, borderTopRightRadius: Radius.xl,
     padding: Spacing.xl, paddingBottom: Spacing.xxxl,

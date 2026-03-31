@@ -64,7 +64,7 @@ export function UpdatePasswordScreen({
 
   return (
     <SafeAreaView style={styles.safe}>
-      <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+      <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
         <View style={styles.header}>
           <TouchableOpacity onPress={onGoBack} style={styles.backBtn}>
             <Ionicons name="arrow-back" size={22} color={Colors.textPrimary} />

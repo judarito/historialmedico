@@ -9,6 +9,8 @@ import {
   TextInput,
   ActivityIndicator,
   Alert,
+  KeyboardAvoidingView,
+  Platform,
 } from 'react-native';
 import { useLocalSearchParams, router } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
@@ -62,6 +64,7 @@ function buildDocumentMetadataUpdate(value?: string | null) {
 export default function ConfirmScanRoute() {
   const { documentId, memberName, visitId, visitDate, doctorName, manual, processingError } = useLocalSearchParams<{
     documentId: string;
+    memberId?: string;
     memberName: string;
     visitId?:   string;
     visitDate?: string;
@@ -83,45 +86,71 @@ export default function ConfirmScanRoute() {
       setStatus('ready');
       return;
     }
-    pollDocument();
+    void pollDocument();
   }, []);
+
+  function applyDocumentResult(data: {
+    parsed_json?: any;
+    processing_status?: string | null;
+    processing_error?: string | null;
+  }) {
+    const parsed = data.parsed_json as any;
+    setMeds(parsed?.medications ?? []);
+    setTests(parsed?.tests ?? []);
+    setVisitData(normalizeExtractedVisitData(parsed));
+    setErrorMessage('');
+
+    const aiDate = parsed?.visit_date as string | null | undefined;
+    if (aiDate) {
+      const aiDateOnly = getDateOnlyKey(aiDate);
+      const visitDateOnly = getDateOnlyKey(visitDate ?? '');
+      if (aiDateOnly && aiDateOnly !== visitDateOnly) {
+        setDetectedVisitDate(aiDate);
+      } else {
+        setDetectedVisitDate(null);
+      }
+    } else {
+      setDetectedVisitDate(null);
+    }
+
+    setStatus('ready');
+  }
+
+  async function readDocumentState(): Promise<boolean> {
+    const { data } = await supabase
+      .from('medical_documents')
+      .select('processing_status, parsed_json, processing_error')
+      .eq('id', documentId)
+      .single();
+
+    if (data?.processing_status === 'processed' || data?.processing_status === 'verified') {
+      applyDocumentResult(data);
+      return true;
+    }
+
+    if (data?.processing_status === 'failed') {
+      setErrorMessage(data.processing_error ?? 'No se pudo extraer informacion de la imagen.');
+      setStatus('error');
+      return true;
+    }
+
+    return false;
+  }
 
   async function pollDocument() {
     if (!documentId) return;
 
+    const initialResolved = await readDocumentState();
+    if (initialResolved) {
+      return;
+    }
+
     for (let i = 0; i < 12; i++) {  // max 60 seg (12 x 5s)
       await sleep(5000);
-      const { data } = await supabase
-        .from('medical_documents')
-        .select('processing_status, parsed_json, processing_error')
-        .eq('id', documentId)
-        .single();
-
       setAttempts(i + 1);
 
-      if (data?.processing_status === 'processed' || data?.processing_status === 'verified') {
-        const parsed = data.parsed_json as any;
-        setMeds(parsed?.medications ?? []);
-        setTests(parsed?.tests ?? []);
-        setVisitData(normalizeExtractedVisitData(parsed));
-        setErrorMessage('');
-
-        // Si la IA detectó una fecha en la fórmula, compararla con la fecha de la visita
-        const aiDate = parsed?.visit_date as string | null | undefined;
-        if (aiDate) {
-          const aiDateOnly = getDateOnlyKey(aiDate);
-          const visitDateOnly = getDateOnlyKey(visitDate ?? '');
-          if (aiDateOnly && aiDateOnly !== visitDateOnly) {
-            setDetectedVisitDate(aiDate);
-          }
-        }
-
-        setStatus('ready');
-        return;
-      }
-      if (data?.processing_status === 'failed') {
-        setErrorMessage(data.processing_error ?? 'No se pudo extraer informacion de la imagen.');
-        setStatus('error');
+      const resolved = await readDocumentState();
+      if (resolved) {
         return;
       }
     }
@@ -207,7 +236,20 @@ export default function ConfirmScanRoute() {
         : hasVisitUpdates
           ? 'Se actualizaron los datos de la visita con la información extraída.'
           : 'La foto quedo confirmada sin registros estructurados. Puedes completar la visita manualmente despues.',
-      [{ text: 'Ir a medicamentos', onPress: () => router.replace('/(app)/(tabs)/medications') }]
+      [{
+        text: 'Ir al familiar',
+        onPress: () => {
+          if (typeof memberId === 'string' && memberId) {
+            router.replace({ pathname: '/(app)/member/[id]', params: { id: memberId } });
+            return;
+          }
+          if (visitId) {
+            router.replace({ pathname: '/(app)/visit/[id]', params: { id: visitId } });
+            return;
+          }
+          router.replace('/(app)/(tabs)/family');
+        },
+      }]
     );
   }
 
@@ -312,7 +354,11 @@ export default function ConfirmScanRoute() {
         </View>
       ) : null}
 
-      <ScrollView contentContainerStyle={styles.content}>
+      <KeyboardAvoidingView
+        style={styles.formWrapper}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      >
+        <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
         {!!errorMessage && (
           <View style={styles.warningBox}>
             <Ionicons name="warning-outline" size={16} color={Colors.warning} />
@@ -458,7 +504,8 @@ export default function ConfirmScanRoute() {
         })()}
 
         <View style={{ height: Spacing.xxxl }} />
-      </ScrollView>
+        </ScrollView>
+      </KeyboardAvoidingView>
     </SafeAreaView>
   );
 }
@@ -506,6 +553,7 @@ const styles = StyleSheet.create({
   retryBtn: { height: 48, backgroundColor: Colors.primary, borderRadius: Radius.lg, paddingHorizontal: Spacing.xl, alignItems: 'center', justifyContent: 'center', marginTop: Spacing.md },
   retryText: { color: Colors.white, fontSize: Typography.base, fontWeight: Typography.semibold },
 
+  formWrapper: { flex: 1 },
   content: { padding: Spacing.base, gap: Spacing.xl },
   warningBox: {
     flexDirection: 'row',

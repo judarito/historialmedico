@@ -12,6 +12,7 @@ export interface GlobalSearchFallbackResult {
   subtitle: string;
   date_ref: string | null;
   navigation_id?: string | null;
+  visit_label?: string | null;
 }
 
 export interface HistoryLocalSearchResult {
@@ -161,6 +162,21 @@ function prescriptionSubtitle(row: {
   return [dose, row.frequency_text, row.presentation].filter(Boolean).join(' · ');
 }
 
+function visitLabel(dateRef: string | null | undefined): string | null {
+  if (!dateRef) return null;
+
+  try {
+    const formatted = new Date(dateRef).toLocaleDateString('es-CO', {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+    });
+    return `Visita ${formatted}`;
+  } catch {
+    return 'Visita vinculada';
+  }
+}
+
 export async function searchGlobalFallback(query: string, limit = 40): Promise<GlobalSearchFallbackResult[]> {
   const normalizedQuery = normalizeText(query);
   if (!normalizedQuery) return [];
@@ -208,6 +224,7 @@ export async function searchGlobalFallback(query: string, limit = 40): Promise<G
   const documents = (documentsRes.data as MedicalDocumentSearchRow[] | null) ?? [];
 
   const membersById = new Map(members.map((member) => [member.id, member]));
+  const visitsById = new Map(visits.map((visit) => [visit.id, visit]));
   const docVisitIds = [...new Set(documents.map((document) => document.medical_visit_id).filter(Boolean))] as string[];
   const activeDocVisitIds = new Set<string>();
 
@@ -276,6 +293,7 @@ export async function searchGlobalFallback(query: string, limit = 40): Promise<G
       subtitle,
       date_ref: visit.visit_date,
       navigation_id: visit.id,
+      visit_label: visitLabel(visit.visit_date),
     });
   }
 
@@ -289,6 +307,9 @@ export async function searchGlobalFallback(query: string, limit = 40): Promise<G
     ])) continue;
 
     const member = membersById.get(prescription.family_member_id);
+    const linkedVisit = prescription.medical_visit_id
+      ? visitsById.get(prescription.medical_visit_id)
+      : null;
     results.push({
       result_type: 'medication',
       filter_category: 'medication',
@@ -298,6 +319,8 @@ export async function searchGlobalFallback(query: string, limit = 40): Promise<G
       title: prescription.medication_name,
       subtitle: prescriptionSubtitle(prescription),
       date_ref: prescription.start_at,
+      navigation_id: linkedVisit?.id ?? null,
+      visit_label: visitLabel(linkedVisit?.visit_date),
     });
   }
 
@@ -305,6 +328,9 @@ export async function searchGlobalFallback(query: string, limit = 40): Promise<G
     if (!matchesQuery(normalizedQuery, [test.test_name, test.category, test.notes])) continue;
 
     const member = membersById.get(test.family_member_id);
+    const linkedVisit = test.medical_visit_id
+      ? visitsById.get(test.medical_visit_id)
+      : null;
     results.push({
       result_type: 'test',
       filter_category: 'test',
@@ -314,6 +340,8 @@ export async function searchGlobalFallback(query: string, limit = 40): Promise<G
       title: test.test_name,
       subtitle: test.category ?? '',
       date_ref: test.ordered_at,
+      navigation_id: linkedVisit?.id ?? null,
+      visit_label: visitLabel(linkedVisit?.visit_date),
     });
   }
 
@@ -322,6 +350,9 @@ export async function searchGlobalFallback(query: string, limit = 40): Promise<G
     if (!matchesQuery(normalizedQuery, [document.title, document.extracted_text, document.document_type])) continue;
 
     const member = membersById.get(document.family_member_id);
+    const linkedVisit = document.medical_visit_id
+      ? visitsById.get(document.medical_visit_id)
+      : null;
     results.push({
       result_type: 'document',
       filter_category: 'document',
@@ -332,6 +363,7 @@ export async function searchGlobalFallback(query: string, limit = 40): Promise<G
       subtitle: documentLabel(document.document_type),
       date_ref: document.captured_at ?? document.created_at,
       navigation_id: document.medical_visit_id,
+      visit_label: visitLabel(linkedVisit?.visit_date),
     });
   }
 

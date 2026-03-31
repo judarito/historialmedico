@@ -9,6 +9,8 @@ import {
   FlatList,
   ActivityIndicator,
   ScrollView,
+  KeyboardAvoidingView,
+  Platform,
 } from 'react-native';
 import { router } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
@@ -31,6 +33,7 @@ interface SearchResult {
   subtitle:        string;
   date_ref:        string | null;
   navigation_id?:  string | null;
+  visit_label?:    string | null;
   match_score?:    number;
   matched_terms?:  string[];
 }
@@ -77,6 +80,20 @@ function deduplicateForAll(results: SearchResult[]): SearchResult[] {
     seen.add(key);
     return true;
   });
+}
+
+function getVisitContextLabel(item: SearchResult): string | null {
+  if (item.visit_label) return item.visit_label;
+
+  if (item.result_type === 'visit' && item.date_ref) {
+    return `Visita ${formatDate(item.date_ref)}`;
+  }
+
+  if (item.navigation_id) {
+    return 'Visita vinculada';
+  }
+
+  return null;
 }
 
 // ── Component ────────────────────────────────────────────────────────────────
@@ -176,12 +193,8 @@ export default function SearchScreen() {
   }
 
   function handleResultPress(item: SearchResult) {
-    if (item.result_type === 'document') {
-      if (item.navigation_id) {
-        router.push({ pathname: '/(app)/visit/[id]', params: { id: item.navigation_id } });
-        return;
-      }
-      router.push({ pathname: '/(app)/member/[id]', params: { id: item.member_id } });
+    if (item.navigation_id) {
+      router.push({ pathname: '/(app)/visit/[id]', params: { id: item.navigation_id } });
       return;
     }
 
@@ -211,6 +224,7 @@ export default function SearchScreen() {
     const meta     = TYPE_META[item.result_type] ?? TYPE_META.member;
     const catLabel = FILTER_CHIPS.find(c => c.key === item.filter_category)?.label ?? '';
     const isAIMatch = (item.match_score ?? 0) > 1;
+    const visitContextLabel = getVisitContextLabel(item);
 
     return (
       <TouchableOpacity style={styles.resultCard} onPress={() => handleResultPress(item)} activeOpacity={0.7}>
@@ -235,6 +249,12 @@ export default function SearchScreen() {
               <Ionicons name="person-outline" size={11} color={Colors.textMuted} />
               <Text style={styles.memberTagText}>{item.member_name}</Text>
             </View>
+            {!!visitContextLabel && (
+              <View style={styles.visitTag}>
+                <Ionicons name="calendar-outline" size={11} color={Colors.textMuted} />
+                <Text style={styles.visitTagText}>{visitContextLabel}</Text>
+              </View>
+            )}
             <View style={[styles.catTag, { backgroundColor: meta.color + '18' }]}>
               <Text style={[styles.catTagText, { color: meta.color }]}>{catLabel}</Text>
             </View>
@@ -251,150 +271,152 @@ export default function SearchScreen() {
 
   return (
     <SafeAreaView style={styles.safe}>
-      {/* Header con barra de búsqueda */}
-      <View style={styles.header}>
-        <TouchableOpacity style={styles.backBtn} onPress={() => router.back()}>
-          <Ionicons name="arrow-back" size={22} color={Colors.textPrimary} />
+      <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+        {/* Header con barra de búsqueda */}
+        <View style={styles.header}>
+          <TouchableOpacity style={styles.backBtn} onPress={() => router.back()}>
+            <Ionicons name="arrow-back" size={22} color={Colors.textPrimary} />
+          </TouchableOpacity>
+
+          <View style={styles.searchBar}>
+            <Ionicons name="search-outline" size={18} color={Colors.textMuted} />
+            <TextInput
+              ref={inputRef}
+              style={styles.searchInput}
+              value={query}
+              onChangeText={handleQueryChange}
+              placeholder="Buscar miembro, medicina, médico..."
+              placeholderTextColor={Colors.textMuted}
+              autoCapitalize="none"
+              autoCorrect={false}
+              autoFocus
+              returnKeyType="search"
+              onSubmitEditing={() => { if (debounceRef.current) clearTimeout(debounceRef.current); if (query.trim()) runSearch(query.trim()); }}
+            />
+            {loading
+              ? <ActivityIndicator size="small" color={Colors.primary} />
+              : !!query
+                ? (
+                  <TouchableOpacity onPress={() => { setQuery(''); setResults([]); setSearched(false); setExpansion(null); }}>
+                    <Ionicons name="close-circle" size={18} color={Colors.textMuted} />
+                  </TouchableOpacity>
+                )
+                : null
+            }
+          </View>
+
+          <VoiceRecordButton
+            size={44}
+            onTranscription={handleVoiceTranscription}
+            disabled={loading}
+          />
+        </View>
+
+        {/* IA: intención detectada + términos expandidos */}
+        {expansion && (
+          <View style={styles.aiBar}>
+            <Ionicons name="sparkles" size={13} color={Colors.primary} />
+            <Text style={styles.aiIntent} numberOfLines={1}>{expansion.intent}</Text>
+            {expansion.terms.length > 1 && (
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.aiTermsScroll}>
+                {expansion.terms.slice(1).map(t => (
+                  <TouchableOpacity
+                    key={t}
+                    style={styles.aiTermChip}
+                    onPress={() => { setQuery(t); runSearch(t); }}
+                  >
+                    <Text style={styles.aiTermText}>{t}</Text>
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            )}
+          </View>
+        )}
+
+        <TouchableOpacity
+          style={styles.directoryCta}
+          onPress={() => router.push('/(app)/doctor-directory')}
+          activeOpacity={0.8}
+        >
+          <View style={styles.directoryCtaIcon}>
+            <Ionicons name="medkit-outline" size={16} color={Colors.primary} />
+          </View>
+          <View style={styles.directoryCtaBody}>
+            <Text style={styles.directoryCtaTitle}>Buscar especialistas en Colombia</Text>
+            <Text style={styles.directoryCtaText}>Usa Google Places con cache compartido para hallar médicos y clínicas.</Text>
+          </View>
+          <Ionicons name="chevron-forward" size={16} color={Colors.textMuted} />
         </TouchableOpacity>
 
-        <View style={styles.searchBar}>
-          <Ionicons name="search-outline" size={18} color={Colors.textMuted} />
-          <TextInput
-            ref={inputRef}
-            style={styles.searchInput}
-            value={query}
-            onChangeText={handleQueryChange}
-            placeholder="Buscar miembro, medicina, médico..."
-            placeholderTextColor={Colors.textMuted}
-            autoCapitalize="none"
-            autoCorrect={false}
-            autoFocus
-            returnKeyType="search"
-            onSubmitEditing={() => { if (debounceRef.current) clearTimeout(debounceRef.current); if (query.trim()) runSearch(query.trim()); }}
-          />
-          {loading
-            ? <ActivityIndicator size="small" color={Colors.primary} />
-            : !!query
-              ? (
-                <TouchableOpacity onPress={() => { setQuery(''); setResults([]); setSearched(false); setExpansion(null); }}>
-                  <Ionicons name="close-circle" size={18} color={Colors.textMuted} />
+        {/* Filter chips */}
+        {results.length > 0 && (
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chipsRow} style={styles.chipsScroll}>
+            {FILTER_CHIPS.map(chip => {
+              const count  = chip.key === 'all' ? totalUniq : (counts[chip.key] ?? 0);
+              if (chip.key !== 'all' && count === 0) return null;
+              const active = filter === chip.key;
+              return (
+                <TouchableOpacity key={chip.key} style={[styles.chip, active && styles.chipActive]} onPress={() => setFilter(chip.key)} activeOpacity={0.7}>
+                  <Ionicons name={chip.icon} size={13} color={active ? Colors.white : Colors.textSecondary} />
+                  <Text style={[styles.chipText, active && styles.chipTextActive]}>{chip.label}</Text>
+                  <View style={[styles.chipBadge, active && styles.chipBadgeActive]}>
+                    <Text style={[styles.chipBadgeText, active && styles.chipBadgeTextActive]}>{count}</Text>
+                  </View>
                 </TouchableOpacity>
-              )
-              : null
-          }
-        </View>
+              );
+            })}
+          </ScrollView>
+        )}
 
-        <VoiceRecordButton
-          size={44}
-          onTranscription={handleVoiceTranscription}
-          disabled={loading}
-        />
-      </View>
-
-      {/* IA: intención detectada + términos expandidos */}
-      {expansion && (
-        <View style={styles.aiBar}>
-          <Ionicons name="sparkles" size={13} color={Colors.primary} />
-          <Text style={styles.aiIntent} numberOfLines={1}>{expansion.intent}</Text>
-          {expansion.terms.length > 1 && (
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.aiTermsScroll}>
-              {expansion.terms.slice(1).map(t => (
-                <TouchableOpacity
-                  key={t}
-                  style={styles.aiTermChip}
-                  onPress={() => { setQuery(t); runSearch(t); }}
-                >
-                  <Text style={styles.aiTermText}>{t}</Text>
-                </TouchableOpacity>
-              ))}
-            </ScrollView>
-          )}
-        </View>
-      )}
-
-      <TouchableOpacity
-        style={styles.directoryCta}
-        onPress={() => router.push('/(app)/doctor-directory')}
-        activeOpacity={0.8}
-      >
-        <View style={styles.directoryCtaIcon}>
-          <Ionicons name="medkit-outline" size={16} color={Colors.primary} />
-        </View>
-        <View style={styles.directoryCtaBody}>
-          <Text style={styles.directoryCtaTitle}>Buscar especialistas en Colombia</Text>
-          <Text style={styles.directoryCtaText}>Usa Google Places con cache compartido para hallar médicos y clínicas.</Text>
-        </View>
-        <Ionicons name="chevron-forward" size={16} color={Colors.textMuted} />
-      </TouchableOpacity>
-
-      {/* Filter chips */}
-      {results.length > 0 && (
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chipsRow} style={styles.chipsScroll}>
-          {FILTER_CHIPS.map(chip => {
-            const count  = chip.key === 'all' ? totalUniq : (counts[chip.key] ?? 0);
-            if (chip.key !== 'all' && count === 0) return null;
-            const active = filter === chip.key;
-            return (
-              <TouchableOpacity key={chip.key} style={[styles.chip, active && styles.chipActive]} onPress={() => setFilter(chip.key)} activeOpacity={0.7}>
-                <Ionicons name={chip.icon} size={13} color={active ? Colors.white : Colors.textSecondary} />
-                <Text style={[styles.chipText, active && styles.chipTextActive]}>{chip.label}</Text>
-                <View style={[styles.chipBadge, active && styles.chipBadgeActive]}>
-                  <Text style={[styles.chipBadgeText, active && styles.chipBadgeTextActive]}>{count}</Text>
-                </View>
-              </TouchableOpacity>
-            );
-          })}
-        </ScrollView>
-      )}
-
-      {/* Results / States */}
-      {!query.trim() ? (
-        <View style={styles.stateCenter}>
-          <Ionicons name="sparkles" size={52} color={Colors.primary + '66'} />
-          <Text style={styles.stateTitle}>Búsqueda inteligente</Text>
-          <Text style={styles.stateText}>
-            Escribe en lenguaje natural.{'\n'}
-            "pastillas para la presión de mamá", "cardiólogo el año pasado", "examen de sangre"
-          </Text>
-        </View>
-      ) : loading && !searched ? (
-        <View style={styles.stateCenter}>
-          <ActivityIndicator color={Colors.primary} size="large" />
-          <Text style={styles.stateText}>Analizando con IA...</Text>
-        </View>
-      ) : searchError ? (
-        <View style={styles.stateCenter}>
-          <Ionicons name="warning-outline" size={48} color={Colors.warning} />
-          <Text style={styles.stateTitle}>Error de búsqueda</Text>
-          <Text style={styles.stateText}>{searchError}</Text>
-          <TouchableOpacity onPress={() => runSearch(query.trim())} style={styles.clearFilterBtn}>
-            <Text style={styles.clearFilterText}>Reintentar</Text>
-          </TouchableOpacity>
-        </View>
-      ) : filtered.length === 0 ? (
-        <View style={styles.stateCenter}>
-          <Ionicons name="file-tray-outline" size={48} color={Colors.textMuted} />
-          <Text style={styles.stateTitle}>Sin resultados</Text>
-          <Text style={styles.stateText}>
-            No se encontró nada para "{query}"
-            {filter !== 'all' ? ` en "${FILTER_CHIPS.find(c => c.key === filter)?.label}"` : ''}.
-          </Text>
-          {filter !== 'all' && (
-            <TouchableOpacity onPress={() => setFilter('all')} style={styles.clearFilterBtn}>
-              <Text style={styles.clearFilterText}>Ver todos los resultados</Text>
+        {/* Results / States */}
+        {!query.trim() ? (
+          <View style={styles.stateCenter}>
+            <Ionicons name="sparkles" size={52} color={Colors.primary + '66'} />
+            <Text style={styles.stateTitle}>Búsqueda inteligente</Text>
+            <Text style={styles.stateText}>
+              Escribe en lenguaje natural.{'\n'}
+              "pastillas para la presión de mamá", "cardiólogo el año pasado", "examen de sangre"
+            </Text>
+          </View>
+        ) : loading && !searched ? (
+          <View style={styles.stateCenter}>
+            <ActivityIndicator color={Colors.primary} size="large" />
+            <Text style={styles.stateText}>Analizando con IA...</Text>
+          </View>
+        ) : searchError ? (
+          <View style={styles.stateCenter}>
+            <Ionicons name="warning-outline" size={48} color={Colors.warning} />
+            <Text style={styles.stateTitle}>Error de búsqueda</Text>
+            <Text style={styles.stateText}>{searchError}</Text>
+            <TouchableOpacity onPress={() => runSearch(query.trim())} style={styles.clearFilterBtn}>
+              <Text style={styles.clearFilterText}>Reintentar</Text>
             </TouchableOpacity>
-          )}
-        </View>
-      ) : (
-        <FlatList
-          data={filtered}
-          keyExtractor={(item, i) => `${item.result_id}:${item.filter_category}:${i}`}
-          renderItem={renderResult}
-          contentContainerStyle={styles.listContent}
-          showsVerticalScrollIndicator={false}
-          keyboardShouldPersistTaps="handled"
-        />
-      )}
+          </View>
+        ) : filtered.length === 0 ? (
+          <View style={styles.stateCenter}>
+            <Ionicons name="file-tray-outline" size={48} color={Colors.textMuted} />
+            <Text style={styles.stateTitle}>Sin resultados</Text>
+            <Text style={styles.stateText}>
+              No se encontró nada para "{query}"
+              {filter !== 'all' ? ` en "${FILTER_CHIPS.find(c => c.key === filter)?.label}"` : ''}.
+            </Text>
+            {filter !== 'all' && (
+              <TouchableOpacity onPress={() => setFilter('all')} style={styles.clearFilterBtn}>
+                <Text style={styles.clearFilterText}>Ver todos los resultados</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+        ) : (
+          <FlatList
+            data={filtered}
+            keyExtractor={(item, i) => `${item.result_id}:${item.filter_category}:${i}`}
+            renderItem={renderResult}
+            contentContainerStyle={styles.listContent}
+            showsVerticalScrollIndicator={false}
+            keyboardShouldPersistTaps="handled"
+          />
+        )}
+      </KeyboardAvoidingView>
     </SafeAreaView>
   );
 }
@@ -403,6 +425,7 @@ export default function SearchScreen() {
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: Colors.background },
+  flex: { flex: 1 },
 
   header: {
     flexDirection: 'row', alignItems: 'center', gap: Spacing.sm,
@@ -506,9 +529,11 @@ const styles = StyleSheet.create({
   resultTitle:    { color: Colors.textPrimary, fontSize: Typography.base, fontWeight: Typography.semibold, flex: 1 },
   aiMatchBadge:   { width: 16, height: 16, borderRadius: 8, backgroundColor: Colors.primary + '22', alignItems: 'center', justifyContent: 'center' },
   resultSubtitle: { color: Colors.textSecondary, fontSize: Typography.xs },
-  resultMeta:     { flexDirection: 'row', alignItems: 'center', gap: Spacing.xs, marginTop: 2 },
+  resultMeta:     { flexDirection: 'row', alignItems: 'center', gap: Spacing.xs, marginTop: 2, flexWrap: 'wrap' },
   memberTag:      { flexDirection: 'row', alignItems: 'center', gap: 3 },
   memberTagText:  { color: Colors.textMuted, fontSize: Typography.xs },
+  visitTag:       { flexDirection: 'row', alignItems: 'center', gap: 3 },
+  visitTagText:   { color: Colors.textMuted, fontSize: Typography.xs },
   catTag:         { borderRadius: Radius.full, paddingHorizontal: 6, paddingVertical: 2 },
   catTagText:     { fontSize: 10, fontWeight: Typography.semibold },
   resultRight:    { alignItems: 'flex-end', gap: 4 },

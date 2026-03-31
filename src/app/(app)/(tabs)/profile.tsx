@@ -8,6 +8,8 @@ import {
   Alert,
   TextInput,
   ActivityIndicator,
+  KeyboardAvoidingView,
+  Platform,
 } from 'react-native';
 import { router, useFocusEffect } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -378,11 +380,12 @@ export default function ProfileTab() {
 
   return (
     <SafeAreaView style={styles.safe}>
-      <ScrollView
-        contentContainerStyle={styles.content}
-        keyboardShouldPersistTaps="handled"
-      >
-        <View style={styles.profileCard}>
+      <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+        <ScrollView
+          contentContainerStyle={styles.content}
+          keyboardShouldPersistTaps="handled"
+        >
+          <View style={styles.profileCard}>
           <Avatar name={fullName} imageUrl={null} size={72} />
           <View style={styles.profileInfo}>
             <Text style={styles.profileName}>{fullName}</Text>
@@ -724,8 +727,9 @@ export default function ProfileTab() {
           <Text style={styles.signOutText}>Cerrar sesión</Text>
         </TouchableOpacity>
 
-        <Text style={styles.version}>Family Health Tracker IA v1.0.0</Text>
-      </ScrollView>
+          <Text style={styles.version}>Family Health Tracker IA v1.0.0</Text>
+        </ScrollView>
+      </KeyboardAvoidingView>
     </SafeAreaView>
   );
 }
@@ -761,6 +765,7 @@ function OptionRow({ icon, label, onPress }: { icon: any; label: string; onPress
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: Colors.background },
+  flex: { flex: 1 },
   content: {
     paddingHorizontal: Spacing.base,
     paddingTop: Spacing.base,

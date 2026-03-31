@@ -21,6 +21,7 @@
       }
     },
     "android": {
+      "softwareKeyboardLayoutMode": "resize",
       "adaptiveIcon": {
         "foregroundImage": "./src/assets/icon-heart-plus.png",
         "backgroundColor": "#0B1628"

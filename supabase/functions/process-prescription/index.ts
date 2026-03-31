@@ -87,6 +87,40 @@ function normalizeText(value: unknown): string | null {
   return normalized ? normalized : null;
 }
 
+function mergeTextBlocks(...values: Array<string | null | undefined>): string | null {
+  const unique = values
+    .map((value) => normalizeText(value))
+    .filter(Boolean)
+    .filter((value, index, array) => array.indexOf(value) === index) as string[];
+
+  return unique.length > 0 ? unique.join("\n\n") : null;
+}
+
+function formatDiagnosisWithPlainLanguage(
+  diagnosis: unknown,
+  plainLanguageDiagnosis: unknown,
+): string | null {
+  const technical = normalizeText(diagnosis);
+  if (!technical) return null;
+
+  const plainLanguage = normalizeText(plainLanguageDiagnosis);
+  if (!plainLanguage) return technical;
+
+  const technicalLc = technical.toLowerCase();
+  const plainLanguageLc = plainLanguage.toLowerCase();
+
+  if (
+    technicalLc.includes(plainLanguageLc) ||
+    plainLanguageLc.includes(technicalLc) ||
+    technical.includes("(") ||
+    technical.includes(" - ")
+  ) {
+    return technical;
+  }
+
+  return `${technical} (${plainLanguage})`;
+}
+
 function normalizeNumber(value: unknown): number | null {
   if (typeof value === "number") {
     return Number.isFinite(value) && value > 0 ? value : null;
@@ -267,6 +301,81 @@ function normalizeExtraction(raw: Partial<AIExtractionResult>): AIExtractionResu
   };
 }
 
+async function suggestDiagnosisWithOpenAI(extracted: AIExtractionResult): Promise<string | null> {
+  if (!OPENAI_API_KEY) return null;
+
+  const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${OPENAI_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model: "gpt-4.1-mini",
+      temperature: 0.1,
+      max_tokens: 180,
+      response_format: { type: "json_object" },
+      messages: [
+        {
+          role: "system",
+          content: `Eres un asistente médico prudente.
+Debes sugerir un diagnóstico o síndrome clínico breve en español a partir de medicamentos, exámenes y contexto.
+REGLAS:
+- Si el diagnóstico explícito ya existe, no lo cambies.
+- Si la evidencia solo orienta a un síndrome, devuelve un síndrome clínico corto.
+- Además devuelve una explicación muy simple, de máximo 3 a 8 palabras, para una persona sin formación médica.
+- La explicación simple debe complementar el diagnóstico técnico, no repetirlo.
+- Si la información es insuficiente o demasiado ambigua, devuelve null.
+- No inventes enfermedades raras ni detalles no sustentados.
+- Responde ÚNICAMENTE con JSON válido.`,
+        },
+        {
+          role: "user",
+          content: JSON.stringify({
+            doctor_name: extracted.doctor_name,
+            specialty: extracted.specialty,
+            institution_name: extracted.institution_name,
+            reason_for_visit: extracted.reason_for_visit,
+            notes: extracted.notes,
+            medications: extracted.medications.map((med) => ({
+              medication_name: med.medication_name,
+              presentation: med.presentation,
+              dose_amount: med.dose_amount,
+              dose_unit: med.dose_unit,
+              frequency_text: med.frequency_text,
+              instructions: med.instructions,
+            })),
+            tests: extracted.tests,
+          }),
+        },
+      ],
+    }),
+  });
+
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`OpenAI diagnosis suggestion error ${response.status}: ${errText}`);
+  }
+
+  const result = await response.json();
+  const content = result.choices?.[0]?.message?.content;
+  if (typeof content !== "string" || !content.trim()) {
+    return null;
+  }
+
+  const cleaned = content
+    .replace(/^```json\s*/i, "")
+    .replace(/^```\s*/i, "")
+    .replace(/\s*```$/, "")
+    .trim();
+
+  const parsed = JSON.parse(cleaned) as {
+    diagnosis?: string | null;
+    plain_language_diagnosis?: string | null;
+  };
+  return formatDiagnosisWithPlainLanguage(parsed.diagnosis, parsed.plain_language_diagnosis);
+}
+
 // ============================================================
 // Llamada a OpenAI Vision API
 // ============================================================
@@ -282,6 +391,7 @@ REGLAS:
 - Extrae solo lo explícitamente escrito en la fórmula
 - Si un campo no es legible, usa null o cadena vacía
 - También extrae datos de la visita si aparecen: médico, especialidad, institución, motivo, diagnóstico, observaciones y signos vitales
+- Si el diagnóstico no aparece escrito, pero los medicamentos, exámenes o el contexto clínico lo orientan claramente, sugiere un diagnóstico breve y prudente en "diagnosis", idealmente en formato "Diagnóstico técnico (explicación sencilla)"
 - Haz dos pasadas mentales sobre la imagen:
   1. Encabezado, sello, membrete y tabla de signos vitales
   2. Medicamentos, exámenes e indicaciones
@@ -387,7 +497,29 @@ REGLAS:
     .trim();
 
   const parsed = JSON.parse(cleaned) as Partial<AIExtractionResult>;
-  return normalizeExtraction(parsed);
+  const normalized = normalizeExtraction(parsed);
+
+  if (!normalized.diagnosis && (
+    normalized.medications.length > 0 ||
+    normalized.tests.length > 0 ||
+    normalized.reason_for_visit ||
+    normalized.specialty
+  )) {
+    try {
+      const suggestedDiagnosis = await suggestDiagnosisWithOpenAI(normalized);
+      if (suggestedDiagnosis) {
+        normalized.diagnosis = suggestedDiagnosis;
+        normalized.notes = mergeTextBlocks(
+          normalized.notes,
+          "Diagnóstico sugerido por IA a partir de medicamentos, exámenes y contexto clínico."
+        );
+      }
+    } catch (error) {
+      console.warn("diagnosis suggestion warning:", error);
+    }
+  }
+
+  return normalized;
 }
 
 // ============================================================

@@ -9,6 +9,8 @@ import {
   Alert,
   StyleSheet,
   ActivityIndicator,
+  KeyboardAvoidingView,
+  Platform,
 } from 'react-native';
 import { useLocalSearchParams, router } from 'expo-router';
 import { supabase } from '../../services/supabase';
@@ -226,12 +228,16 @@ export default function AddVisitScreen() {
         }
       </View>
 
-      <ScrollView
-        style={styles.scroll}
-        contentContainerStyle={styles.scrollContent}
-        keyboardShouldPersistTaps="handled"
-        showsVerticalScrollIndicator={false}
+      <KeyboardAvoidingView
+        style={styles.formWrapper}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
       >
+        <ScrollView
+          style={styles.scroll}
+          contentContainerStyle={styles.scrollContent}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+        >
         {/* ── Main fields ── */}
         <DatePickerField
           label="Fecha y hora *"
@@ -435,7 +441,8 @@ export default function AddVisitScreen() {
             <Text style={styles.saveBtnText}>Guardar visita</Text>
           )}
         </TouchableOpacity>
-      </ScrollView>
+        </ScrollView>
+      </KeyboardAvoidingView>
     </SafeAreaView>
   );
 }
@@ -495,6 +502,9 @@ const styles = StyleSheet.create({
 
   // Scroll
   scroll: {
+    flex: 1,
+  },
+  formWrapper: {
     flex: 1,
   },
   scrollContent: {

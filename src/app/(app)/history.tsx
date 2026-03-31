@@ -9,6 +9,8 @@ import {
   TextInput,
   TouchableOpacity,
   View,
+  KeyboardAvoidingView,
+  Platform,
 } from 'react-native';
 import { useLocalSearchParams, router } from 'expo-router';
 import { supabase } from '../../services/supabase';
@@ -75,6 +77,14 @@ interface SearchResult {
 }
 
 type TabKey = 'visits' | 'medications' | 'exams';
+
+function sortVisitsByDateDesc(visits: MedicalVisit[]): MedicalVisit[] {
+  return [...visits].sort((a, b) => {
+    const aTime = a.visit_date ? new Date(a.visit_date).getTime() : 0;
+    const bTime = b.visit_date ? new Date(b.visit_date).getTime() : 0;
+    return bTime - aTime;
+  });
+}
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -190,7 +200,7 @@ export default function HistoryScreen() {
         .order('created_at', { ascending: false }),
     ]);
 
-    setVisits((visitsRes.data as MedicalVisit[]) ?? []);
+    setVisits(sortVisitsByDateDesc((visitsRes.data as MedicalVisit[] | null) ?? []));
     setPrescriptions((prescRes.data as Prescription[]) ?? []);
     setTests((testsRes.data as MedicalTest[]) ?? []);
     setLoading(false);
@@ -394,6 +404,7 @@ export default function HistoryScreen() {
 
   function renderSearchResult({ item }: { item: SearchResult }) {
     const isVisit = item.result_type === 'visit';
+    const visitLabel = item.date_ref ? `Visita ${formatDate(item.date_ref)}` : 'Visita vinculada';
     return (
       <TouchableOpacity
         style={styles.searchResultItem}
@@ -407,7 +418,14 @@ export default function HistoryScreen() {
         <View style={styles.searchResultText}>
           <Text style={styles.searchResultTitle}>{item.title || '(sin título)'}</Text>
           {!!item.subtitle && <Text style={styles.searchResultSub}>{item.subtitle}</Text>}
-          <Text style={styles.searchResultDate}>{formatDate(item.date_ref)}</Text>
+          <View style={styles.searchResultMetaRow}>
+            <View style={styles.searchMetaChip}>
+              <Text style={styles.searchMetaChipText}>{memberName || 'Familiar'}</Text>
+            </View>
+            <View style={styles.searchMetaChip}>
+              <Text style={styles.searchMetaChipText}>{visitLabel}</Text>
+            </View>
+          </View>
         </View>
         {isVisit && <Text style={styles.chevron}>›</Text>}
       </TouchableOpacity>
@@ -420,133 +438,135 @@ export default function HistoryScreen() {
 
   return (
     <SafeAreaView style={styles.safe}>
-      {/* Header */}
-      <View style={styles.header}>
-        <TouchableOpacity onPress={() => router.back()} style={styles.backBtn} hitSlop={8}>
-          <Text style={styles.backArrow}>‹</Text>
-        </TouchableOpacity>
-        <View style={styles.headerText}>
-          <Text style={styles.headerTitle}>Historial Médico</Text>
-          {!!memberName && (
-            <Text style={styles.headerSub}>{memberName}</Text>
-          )}
-        </View>
-      </View>
-
-      {/* Search bar */}
-      <View style={styles.searchContainer}>
-        <Text style={styles.searchIcon}>🔍</Text>
-        <TextInput
-          style={styles.searchInput}
-          value={searchQuery}
-          onChangeText={setSearchQuery}
-          placeholder="Buscar medicamento, diagnóstico..."
-          placeholderTextColor={Colors.textMuted}
-          autoCapitalize="none"
-          autoCorrect={false}
-          clearButtonMode="while-editing"
-        />
-        {searchLoading && (
-          <ActivityIndicator size="small" color={Colors.primary} style={{ marginLeft: Spacing.sm }} />
-        )}
-      </View>
-
-      {showSearch ? (
-        /* ── Search results overlay ── */
-        <View style={styles.flex}>
-          {searchResults.length === 0 && !searchLoading ? (
-            <EmptyState text="Sin resultados para esa búsqueda" />
-          ) : (
-            <FlatList
-              data={searchResults}
-              keyExtractor={item => item.result_id}
-              renderItem={renderSearchResult}
-              contentContainerStyle={styles.listContent}
-              showsVerticalScrollIndicator={false}
-            />
-          )}
-        </View>
-      ) : (
-        <>
-          {/* ── Tabs ── */}
-          <View style={styles.tabBar}>
-            {(
-              [
-                { key: 'visits',      label: 'Visitas'       },
-                { key: 'medications', label: 'Medicamentos'  },
-                { key: 'exams',       label: 'Exámenes'      },
-              ] as { key: TabKey; label: string }[]
-            ).map(tab => (
-              <TouchableOpacity
-                key={tab.key}
-                style={[styles.tabPill, activeTab === tab.key && styles.tabPillActive]}
-                onPress={() => setActiveTab(tab.key)}
-                activeOpacity={0.75}
-              >
-                <Text
-                  style={[
-                    styles.tabLabel,
-                    activeTab === tab.key && styles.tabLabelActive,
-                  ]}
-                >
-                  {tab.label}
-                </Text>
-              </TouchableOpacity>
-            ))}
+      <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+        {/* Header */}
+        <View style={styles.header}>
+          <TouchableOpacity onPress={() => router.back()} style={styles.backBtn} hitSlop={8}>
+            <Text style={styles.backArrow}>‹</Text>
+          </TouchableOpacity>
+          <View style={styles.headerText}>
+            <Text style={styles.headerTitle}>Historial Médico</Text>
+            {!!memberName && (
+              <Text style={styles.headerSub}>{memberName}</Text>
+            )}
           </View>
+        </View>
 
-          {/* ── Tab content ── */}
-          {loading ? (
-            <View style={styles.loadingCenter}>
-              <ActivityIndicator size="large" color={Colors.primary} />
-            </View>
-          ) : (
-            <View style={styles.flex}>
-              {activeTab === 'visits' && (
-                visits.length === 0 ? (
-                  <EmptyState text="Sin visitas registradas" />
-                ) : (
-                  <FlatList
-                    data={visits}
-                    keyExtractor={item => item.id}
-                    renderItem={renderVisitItem}
-                    contentContainerStyle={styles.listContent}
-                    showsVerticalScrollIndicator={false}
-                  />
-                )
-              )}
-
-              {activeTab === 'medications' && (
-                prescriptions.length === 0 ? (
-                  <EmptyState text="Sin medicamentos registrados" />
-                ) : (
-                  <FlatList
-                    data={prescriptions}
-                    keyExtractor={item => item.id}
-                    renderItem={renderPrescriptionItem}
-                    contentContainerStyle={styles.listContent}
-                    showsVerticalScrollIndicator={false}
-                  />
-                )
-              )}
-
-              {activeTab === 'exams' && (
-                tests.length === 0 ? (
-                  <EmptyState text="Sin exámenes registrados" />
-                ) : (
-                  <FlatList
-                    data={tests}
-                    keyExtractor={item => item.id}
-                    renderItem={renderTestItem}
-                    contentContainerStyle={styles.listContent}
-                    showsVerticalScrollIndicator={false}
-                  />
-                )
-              )}
-            </View>
+        {/* Search bar */}
+        <View style={styles.searchContainer}>
+          <Text style={styles.searchIcon}>🔍</Text>
+          <TextInput
+            style={styles.searchInput}
+            value={searchQuery}
+            onChangeText={setSearchQuery}
+            placeholder="Buscar medicamento, diagnóstico..."
+            placeholderTextColor={Colors.textMuted}
+            autoCapitalize="none"
+            autoCorrect={false}
+            clearButtonMode="while-editing"
+          />
+          {searchLoading && (
+            <ActivityIndicator size="small" color={Colors.primary} style={{ marginLeft: Spacing.sm }} />
           )}
-        </>
-      )}
+        </View>
+
+        {showSearch ? (
+          /* ── Search results overlay ── */
+          <View style={styles.flex}>
+            {searchResults.length === 0 && !searchLoading ? (
+              <EmptyState text="Sin resultados para esa búsqueda" />
+            ) : (
+              <FlatList
+                data={searchResults}
+                keyExtractor={item => item.result_id}
+                renderItem={renderSearchResult}
+                contentContainerStyle={styles.listContent}
+                showsVerticalScrollIndicator={false}
+              />
+            )}
+          </View>
+        ) : (
+          <>
+            {/* ── Tabs ── */}
+            <View style={styles.tabBar}>
+              {(
+                [
+                  { key: 'visits',      label: 'Visitas'       },
+                  { key: 'medications', label: 'Medicamentos'  },
+                  { key: 'exams',       label: 'Exámenes'      },
+                ] as { key: TabKey; label: string }[]
+              ).map(tab => (
+                <TouchableOpacity
+                  key={tab.key}
+                  style={[styles.tabPill, activeTab === tab.key && styles.tabPillActive]}
+                  onPress={() => setActiveTab(tab.key)}
+                  activeOpacity={0.75}
+                >
+                  <Text
+                    style={[
+                      styles.tabLabel,
+                      activeTab === tab.key && styles.tabLabelActive,
+                    ]}
+                  >
+                    {tab.label}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+
+            {/* ── Tab content ── */}
+            {loading ? (
+              <View style={styles.loadingCenter}>
+                <ActivityIndicator size="large" color={Colors.primary} />
+              </View>
+            ) : (
+              <View style={styles.flex}>
+                {activeTab === 'visits' && (
+                  visits.length === 0 ? (
+                    <EmptyState text="Sin visitas registradas" />
+                  ) : (
+                    <FlatList
+                      data={visits}
+                      keyExtractor={item => item.id}
+                      renderItem={renderVisitItem}
+                      contentContainerStyle={styles.listContent}
+                      showsVerticalScrollIndicator={false}
+                    />
+                  )
+                )}
+
+                {activeTab === 'medications' && (
+                  prescriptions.length === 0 ? (
+                    <EmptyState text="Sin medicamentos registrados" />
+                  ) : (
+                    <FlatList
+                      data={prescriptions}
+                      keyExtractor={item => item.id}
+                      renderItem={renderPrescriptionItem}
+                      contentContainerStyle={styles.listContent}
+                      showsVerticalScrollIndicator={false}
+                    />
+                  )
+                )}
+
+                {activeTab === 'exams' && (
+                  tests.length === 0 ? (
+                    <EmptyState text="Sin exámenes registrados" />
+                  ) : (
+                    <FlatList
+                      data={tests}
+                      keyExtractor={item => item.id}
+                      renderItem={renderTestItem}
+                      contentContainerStyle={styles.listContent}
+                      showsVerticalScrollIndicator={false}
+                    />
+                  )
+                )}
+              </View>
+            )}
+          </>
+        )}
+      </KeyboardAvoidingView>
     </SafeAreaView>
   );
 }
@@ -762,10 +782,23 @@ const styles = StyleSheet.create({
     color: Colors.textSecondary,
     marginTop: 2,
   },
-  searchResultDate: {
+  searchResultMetaRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: Spacing.xs,
+    marginTop: Spacing.xs,
+  },
+  searchMetaChip: {
+    borderRadius: Radius.full,
+    paddingHorizontal: Spacing.sm,
+    paddingVertical: 4,
+    backgroundColor: Colors.background,
+    borderWidth: 1,
+    borderColor: Colors.border,
+  },
+  searchMetaChipText: {
     fontSize: Typography.xs,
     color: Colors.textMuted,
-    marginLeft: Spacing.sm,
   },
   chevron: {
     fontSize: Typography.lg,

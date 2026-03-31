@@ -94,7 +94,7 @@ src/app/
     ├── history.tsx              # Historial por miembro: fallback local + RPC + expansión IA
     ├── member/[id].tsx          # Detalle de miembro (visitas, medicamentos)
     ├── notifications.tsx        # Campanita / inbox de notificaciones con realtime
-    ├── visit/[id].tsx           # Detalle de visita (datos, vitales, documentos adjuntos + preview imagen/audio original)
+    ├── visit/[id].tsx           # Detalle de visita (datos, vitales, medicamentos/exámenes derivados, documentos adjuntos + preview imagen/audio original; permite reprogramar citas futuras y editar/inferir diagnóstico)
     │
     └── (tabs)/                  # Tab bar principal
         ├── index.tsx            # Dashboard — saludo + stats + familia + barra búsqueda IA + acceso a especialistas guardados
@@ -149,6 +149,7 @@ src/app/
 | `search-ai` | `{ query, limit, memberContext? }` | DeepSeek expande términos; en historial puede usar contexto del paciente para afinar la expansión |
 | `search-medical-places` | `{ query, citySlug?, specialtySlug?, latitude?, longitude?, ... }` | Busca especialistas/lugares médicos con Google Places + cache global en Supabase |
 | `get-medical-place-details` | `{ placeId, forceRefresh? }` | Carga teléfono/web/horarios/rating solo al abrir la ficha y los cachea por separado |
+| `infer-visit-diagnosis` | `{ visit, prescriptions, tests }` | Sugiere un diagnóstico breve y prudente desde el detalle de visita usando contexto clínico + medicamentos/exámenes |
 | `voice-to-data` | `{ transcription, context }` | DeepSeek extrae datos estructurados de visita médica (solo si context='visit') |
 | `send-notifications` | — | Cron: envía recordatorios pendientes de medicamentos, examenes y citas |
 
@@ -345,6 +346,7 @@ UI de resultados
 
 - `process-prescription` ya no usa DeepSeek para imágenes. La extracción OCR/visión de fotos está migrada a OpenAI (`gpt-4.1-mini`).
 - `voice-to-data` y `search-ai` permanecen en DeepSeek.
+- Cuando la IA sugiere un diagnóstico, ahora puede devolverlo como `Diagnóstico técnico (explicación sencilla)` para que siga siendo útil también para cuidadores.
 - Se intentó centralizar la capa de IA en `supabase/functions/_shared/ai.ts`, pero se revirtió porque el bundler del Dashboard de Supabase no resolvía imports locales; hoy las tres Edge Functions son autocontenidas.
 - Las imágenes originales se conservan en Storage y su metadata queda en `medical_documents`.
 - Las notas de voz nuevas ahora conservan el audio original en Storage y también crean un `medical_documents` asociado a la visita.
@@ -395,6 +397,7 @@ UI de resultados
 - **Diagnóstico runtime:** `src/services/runtimeDiagnostics.ts`, `src/components/RuntimeDiagnosticsScreen.tsx`, `src/components/ErrorBoundary.tsx` y `src/app/_layout.tsx` ahora registran pasos de boot, errores globales, promesas rechazadas y muestran el último error real en pantalla.
 - **Bootstrap Supabase:** `src/services/supabase.ts` evita fallar en import-time cuando faltan `EXPO_PUBLIC_SUPABASE_URL` / `EXPO_PUBLIC_SUPABASE_ANON_KEY`; el problema queda visible en la UI de diagnóstico.
 - **Notificaciones web:** `src/services/notifications.ts` omite el registro push y las notificaciones locales en web para no disparar el error de `notification.vapidPublicKey`.
+- **Detalle de visita:** el editor de `visit/[id].tsx` ya puede actualizar motivo de consulta, síntomas/observaciones y, para visitas no futuras, editar o inferir el diagnóstico con IA usando ese contexto clínico.
 
 ---
 

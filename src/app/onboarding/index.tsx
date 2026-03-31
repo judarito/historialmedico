@@ -9,6 +9,8 @@ import {
   ScrollView,
   Alert,
   ActivityIndicator,
+  KeyboardAvoidingView,
+  Platform,
 } from 'react-native';
 import { router } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
@@ -108,8 +110,9 @@ export default function OnboardingCreateFamily() {
 
   return (
     <SafeAreaView style={styles.safe}>
-      <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
-        <View style={styles.heroCard}>
+      <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+        <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
+          <View style={styles.heroCard}>
           <View style={styles.iconWrap}>
             <Ionicons name="people" size={56} color={Colors.primary} />
           </View>
@@ -209,29 +212,31 @@ export default function OnboardingCreateFamily() {
           {error ? <Text style={styles.errorText}>{error}</Text> : null}
         </View>
 
-        <TouchableOpacity
-          style={[styles.btn, loading ? styles.btnDisabled : null]}
-          onPress={handleCreate}
-          disabled={loading}
-          activeOpacity={0.8}
-        >
-          {loading ? (
-            <ActivityIndicator color={Colors.white} />
-          ) : (
-            <Text style={styles.btnText}>
-              {isCompletingExistingTenant
-                ? 'Completar familia y continuar'
-                : `Continuar con ${getTenantPlanLabel(selectedPlan)}`}
-            </Text>
-          )}
-        </TouchableOpacity>
-      </ScrollView>
+          <TouchableOpacity
+            style={[styles.btn, loading ? styles.btnDisabled : null]}
+            onPress={handleCreate}
+            disabled={loading}
+            activeOpacity={0.8}
+          >
+            {loading ? (
+              <ActivityIndicator color={Colors.white} />
+            ) : (
+              <Text style={styles.btnText}>
+                {isCompletingExistingTenant
+                  ? 'Completar familia y continuar'
+                  : `Continuar con ${getTenantPlanLabel(selectedPlan)}`}
+              </Text>
+            )}
+          </TouchableOpacity>
+        </ScrollView>
+      </KeyboardAvoidingView>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: Colors.background },
+  flex: { flex: 1 },
   loadingState: {
     flex: 1,
     alignItems: 'center',
@@ -245,6 +250,7 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
   content: {
+    flexGrow: 1,
     paddingHorizontal: Spacing.xl,
     paddingTop: Spacing.xxl,
     paddingBottom: Spacing.xxxl,
