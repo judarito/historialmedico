@@ -13,7 +13,7 @@ export default function RegisterRoute() {
     } else {
       Alert.alert(
         'Cuenta creada',
-        'Revisa tu correo para confirmar tu cuenta y luego inicia sesión.',
+        'Revisa tu correo para confirmar tu cuenta y luego inicia sesión. Si tenías una invitación pendiente con ese correo, se activará automáticamente al entrar.',
         [{ text: 'Ir al login', onPress: () => router.replace('/login') }]
       );
     }

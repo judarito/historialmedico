@@ -17,21 +17,9 @@ import { useAuthStore } from '../../store/authStore';
 import { Colors, Typography, Spacing, Radius } from '../../theme';
 import { DatePickerField } from '../../components/ui/DatePickerField';
 import { VoiceRecordButton } from '../../components/ui/VoiceRecordButton';
+import { createCurrentDateTimeInput, toInputValue, toStoredIso } from '../../utils';
 
-type VisitStatus = 'draft' | 'completed' | 'cancelled';
-
-// ── Helpers ────────────────────────────────────────────────────────────────
-
-function todayISO(): string {
-  const now = new Date();
-  const pad = (n: number) => String(n).padStart(2, '0');
-  return (
-    `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}` +
-    `T${pad(now.getHours())}:${pad(now.getMinutes())}`
-  );
-}
-
-// ── Component ──────────────────────────────────────────────────────────────
+type VisitStatus = 'draft' | 'scheduled' | 'completed' | 'cancelled';
 
 export default function AddVisitScreen() {
   const { memberId, memberName } = useLocalSearchParams<{
@@ -43,7 +31,7 @@ export default function AddVisitScreen() {
   const { user } = useAuthStore();
 
   // ── form state ────────────────────────────────────────────────────────
-  const [visitDate, setVisitDate]             = useState(todayISO());
+  const [visitDate, setVisitDate]             = useState(createCurrentDateTimeInput());
   const [doctorName, setDoctorName]           = useState('');
   const [specialty, setSpecialty]             = useState('');
   const [institutionName, setInstitutionName] = useState('');
@@ -84,7 +72,10 @@ export default function AddVisitScreen() {
       // Pre-fill from structured extraction
       const s = data.structured;
       if (s) {
-        if (s.visit_date)       setVisitDate(s.visit_date.slice(0, 16));
+        if (s.visit_date) {
+          const nextVisitDate = toInputValue(s.visit_date, true);
+          if (nextVisitDate) setVisitDate(nextVisitDate);
+        }
         if (s.doctor_name)      setDoctorName(s.doctor_name);
         if (s.specialty)        setSpecialty(s.specialty);
         if (s.institution_name) setInstitutionName(s.institution_name);
@@ -129,11 +120,22 @@ export default function AddVisitScreen() {
 
     setSaving(true);
 
+    const storedVisitDate = toStoredIso(visitDate, true);
+    if (!storedVisitDate) {
+      setSaving(false);
+      Alert.alert('Error', 'La fecha de la visita no es válida.');
+      return;
+    }
+
+    const visitStatus: VisitStatus = new Date(storedVisitDate).getTime() > Date.now()
+      ? 'scheduled'
+      : 'completed';
+
     const { error } = await supabase.from('medical_visits').insert({
       tenant_id:        tenant.id,
       family_id:        family.id,
       family_member_id: memberId,
-      visit_date:       new Date(visitDate).toISOString(),
+      visit_date:       storedVisitDate,
       doctor_name:      doctorName.trim()        || null,
       specialty:        specialty.trim()         || null,
       institution_name: institutionName.trim()   || null,
@@ -145,7 +147,7 @@ export default function AddVisitScreen() {
       temperature_c:    temperatureC ? parseFloat(temperatureC) : null,
       blood_pressure:   bloodPressure.trim()     || null,
       heart_rate:       heartRate   ? parseFloat(heartRate)   : null,
-      status:           'completed' as VisitStatus,
+      status:           visitStatus,
       created_by:       user.id,
     });
 
@@ -154,9 +156,13 @@ export default function AddVisitScreen() {
     if (error) {
       Alert.alert('Error al guardar', error.message);
     } else {
-      Alert.alert('Visita guardada', 'La visita fue registrada correctamente.', [
-        { text: 'OK', onPress: () => router.back() },
-      ]);
+      Alert.alert(
+        visitStatus === 'scheduled' ? 'Cita programada' : 'Visita guardada',
+        visitStatus === 'scheduled'
+          ? 'La cita futura fue creada y el sistema podra recordartela.'
+          : 'La visita fue registrada correctamente.',
+        [{ text: 'OK', onPress: () => router.back() }]
+      );
     }
   }
 
@@ -198,8 +204,10 @@ export default function AddVisitScreen() {
           value={visitDate}
           onChange={setVisitDate}
           withTime
-          maximumDate={new Date()}
         />
+        <Text style={styles.helperText}>
+          Si eliges una fecha futura, se guardara como cita programada y recibiras recordatorios.
+        </Text>
 
         <Field label="Médico">
           <TextInput
@@ -423,6 +431,12 @@ const styles = StyleSheet.create({
     fontWeight: Typography.medium,
     color: Colors.textSecondary,
     marginBottom: Spacing.xs,
+  },
+  helperText: {
+    color: Colors.textMuted,
+    fontSize: Typography.xs,
+    marginTop: Spacing.xs,
+    marginBottom: Spacing.base,
   },
   input: {
     backgroundColor: Colors.surface,

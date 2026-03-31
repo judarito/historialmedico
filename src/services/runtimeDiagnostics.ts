@@ -37,6 +37,7 @@ interface CaptureOptions {
 type RuntimeErrorListener = (entry: RuntimeDiagnosticEntry) => void;
 
 const listeners = new Set<RuntimeErrorListener>();
+let bootMutationQueue: Promise<void> = Promise.resolve();
 
 function toId(prefix: string): string {
   return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -73,6 +74,12 @@ async function appendEntry(entry: RuntimeDiagnosticEntry): Promise<void> {
   const current = await readJson<RuntimeDiagnosticEntry[]>(DIAGNOSTICS_LOGS_KEY);
   const next = [entry, ...(current ?? [])].slice(0, MAX_LOG_ENTRIES);
   await writeJson(DIAGNOSTICS_LOGS_KEY, next);
+}
+
+function enqueueBootMutation<T>(task: () => Promise<T>): Promise<T> {
+  const nextTask = bootMutationQueue.then(task, task);
+  bootMutationQueue = nextTask.then(() => undefined, () => undefined);
+  return nextTask;
 }
 
 function notifyListeners(entry: RuntimeDiagnosticEntry): void {
@@ -125,87 +132,96 @@ export async function getDiagnosticsReport(): Promise<RuntimeDiagnosticsReport> 
 }
 
 export async function clearDiagnostics(): Promise<void> {
-  try {
-    await AsyncStorage.multiRemove([DIAGNOSTICS_BOOT_KEY, DIAGNOSTICS_LOGS_KEY]);
-  } catch {
-    // No-op
-  }
+  await enqueueBootMutation(async () => {
+    try {
+      await AsyncStorage.multiRemove([DIAGNOSTICS_BOOT_KEY, DIAGNOSTICS_LOGS_KEY]);
+    } catch {
+      // No-op
+    }
+  });
 }
 
 export async function beginBootSession(initialStep: string): Promise<BootSnapshot> {
-  const previous = await getBootSnapshot();
+  return enqueueBootMutation(async () => {
+    const previous = await getBootSnapshot();
 
-  if (previous?.status === 'booting') {
+    if (previous?.status === 'booting') {
+      await appendEntry({
+        id: toId('boot_interrupted'),
+        at: new Date().toISOString(),
+        severity: 'info',
+        source: 'boot.previous',
+        message: `La sesion previa se interrumpio antes de marcarse como lista. Ultimo paso: ${previous.lastStep}`,
+        extra: safeExtra({ previousSessionId: previous.sessionId, startedAt: previous.startedAt }),
+      });
+    }
+
+    const now = new Date().toISOString();
+    const snapshot: BootSnapshot = {
+      sessionId: toId('boot'),
+      startedAt: now,
+      updatedAt: now,
+      status: 'booting',
+      lastStep: initialStep,
+    };
+
+    await writeJson(DIAGNOSTICS_BOOT_KEY, snapshot);
     await appendEntry({
-      id: toId('boot_incomplete'),
-      at: new Date().toISOString(),
-      severity: 'error',
-      source: 'boot.previous',
-      message: `La sesion previa no finalizo correctamente. Ultimo paso: ${previous.lastStep}`,
-      extra: safeExtra({ previousSessionId: previous.sessionId, startedAt: previous.startedAt }),
+      id: toId('boot_start'),
+      at: now,
+      severity: 'info',
+      source: 'boot.start',
+      message: initialStep,
+      extra: safeExtra({ sessionId: snapshot.sessionId }),
     });
-  }
-
-  const now = new Date().toISOString();
-  const snapshot: BootSnapshot = {
-    sessionId: toId('boot'),
-    startedAt: now,
-    updatedAt: now,
-    status: 'booting',
-    lastStep: initialStep,
-  };
-
-  await writeJson(DIAGNOSTICS_BOOT_KEY, snapshot);
-  await appendEntry({
-    id: toId('boot_start'),
-    at: now,
-    severity: 'info',
-    source: 'boot.start',
-    message: initialStep,
-    extra: safeExtra({ sessionId: snapshot.sessionId }),
+    return snapshot;
   });
-  return snapshot;
 }
 
 export async function markBootStep(step: string, extra?: unknown): Promise<void> {
-  const current = await getBootSnapshot();
-  if (!current) return;
+  await enqueueBootMutation(async () => {
+    const current = await getBootSnapshot();
+    if (!current) return;
 
-  const updated: BootSnapshot = {
-    ...current,
-    updatedAt: new Date().toISOString(),
-    lastStep: step,
-  };
+    const updated: BootSnapshot = {
+      ...current,
+      updatedAt: new Date().toISOString(),
+      lastStep: step,
+    };
 
-  await writeJson(DIAGNOSTICS_BOOT_KEY, updated);
-  await appendEntry({
-    id: toId('boot_step'),
-    at: updated.updatedAt,
-    severity: 'info',
-    source: 'boot.step',
-    message: step,
-    extra: safeExtra(extra),
+    await writeJson(DIAGNOSTICS_BOOT_KEY, updated);
+    await appendEntry({
+      id: toId('boot_step'),
+      at: updated.updatedAt,
+      severity: 'info',
+      source: 'boot.step',
+      message: step,
+      extra: safeExtra(extra),
+    });
   });
 }
 
 export async function markBootReady(step = 'boot.ready'): Promise<void> {
-  const current = await getBootSnapshot();
-  if (!current) return;
+  await enqueueBootMutation(async () => {
+    const current = await getBootSnapshot();
+    if (!current) return;
 
-  const updated: BootSnapshot = {
-    ...current,
-    updatedAt: new Date().toISOString(),
-    status: 'ready',
-    lastStep: step,
-  };
+    const updated: BootSnapshot = {
+      ...current,
+      updatedAt: new Date().toISOString(),
+      status: 'ready',
+      lastStep: step,
+      lastError: undefined,
+    };
 
-  await writeJson(DIAGNOSTICS_BOOT_KEY, updated);
-  await appendEntry({
-    id: toId('boot_ready'),
-    at: updated.updatedAt,
-    severity: 'info',
-    source: 'boot.ready',
-    message: step,
+    await writeJson(DIAGNOSTICS_BOOT_KEY, updated);
+    await appendEntry({
+      id: toId('boot_ready'),
+      at: updated.updatedAt,
+      severity: 'info',
+      source: 'boot.ready',
+      message: step,
+    });
   });
 }
 
@@ -231,8 +247,10 @@ export async function captureException(
   await appendEntry(entry);
 
   if (options.markBootFailed) {
-    const current = await getBootSnapshot();
-    if (current) {
+    await enqueueBootMutation(async () => {
+      const current = await getBootSnapshot();
+      if (!current) return;
+
       const updated: BootSnapshot = {
         ...current,
         updatedAt: entry.at,
@@ -241,7 +259,7 @@ export async function captureException(
         lastError: entry,
       };
       await writeJson(DIAGNOSTICS_BOOT_KEY, updated);
-    }
+    });
   }
 
   notifyListeners(entry);
@@ -250,7 +268,7 @@ export async function captureException(
 
 export function getLatestErrorEntry(report: RuntimeDiagnosticsReport | null): RuntimeDiagnosticEntry | null {
   if (!report) return null;
-  return report.entries.find((entry) => entry.severity === 'error') ?? report.boot?.lastError ?? null;
+  return report.boot?.lastError ?? report.entries.find((entry) => entry.severity === 'error') ?? null;
 }
 
 export function formatDiagnosticsReport(report: RuntimeDiagnosticsReport): string {

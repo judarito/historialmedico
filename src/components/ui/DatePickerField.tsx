@@ -9,6 +9,12 @@ import {
 import DateTimePicker, { DateTimePickerEvent } from '@react-native-community/datetimepicker';
 import { Ionicons } from '@expo/vector-icons';
 import { Colors, Typography, Spacing, Radius } from '../../theme';
+import {
+  formatCalendarDate,
+  formatDateTimeLabel,
+  formatInputValue,
+  parseDateValue,
+} from '../../utils';
 
 interface DatePickerFieldProps {
   label: string;
@@ -22,23 +28,7 @@ interface DatePickerFieldProps {
 }
 
 function toDisplayDate(iso: string, withTime?: boolean): string {
-  if (!iso) return '';
-  const d = new Date(iso);
-  if (isNaN(d.getTime())) return iso;
-  if (withTime) {
-    return d.toLocaleString('es-CO', {
-      day: '2-digit', month: 'short', year: 'numeric',
-      hour: '2-digit', minute: '2-digit',
-    });
-  }
-  return d.toLocaleDateString('es-CO', { day: '2-digit', month: 'short', year: 'numeric' });
-}
-
-function isoFromDate(d: Date, withTime?: boolean): string {
-  const pad = (n: number) => String(n).padStart(2, '0');
-  const date = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-  if (!withTime) return date;
-  return `${date}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  return withTime ? formatDateTimeLabel(iso) : formatCalendarDate(iso);
 }
 
 export function DatePickerField({
@@ -47,28 +37,49 @@ export function DatePickerField({
 }: DatePickerFieldProps) {
   const [show, setShow] = useState(false);
   const [mode, setMode] = useState<'date' | 'time'>('date');
+  const [draftDate, setDraftDate] = useState<Date | null>(null);
 
-  const currentDate = value ? new Date(value) : new Date();
+  const currentDate = draftDate ?? parseDateValue(value) ?? new Date();
 
-  function handleChange(_event: DateTimePickerEvent, selected?: Date) {
-    if (Platform.OS === 'android') setShow(false);
+  function handleChange(event: DateTimePickerEvent, selected?: Date) {
+    if (event.type === 'dismissed') {
+      setShow(false);
+      setMode('date');
+      setDraftDate(null);
+      return;
+    }
+
     if (!selected) return;
 
-    if (withTime && mode === 'date') {
-      // On Android, after picking the date, open the time picker
-      onChange(isoFromDate(selected, withTime));
+    if (withTime && mode === 'date' && Platform.OS === 'android') {
+      setDraftDate(selected);
       if (Platform.OS === 'android') {
         setMode('time');
         setShow(true);
       }
     } else {
-      onChange(isoFromDate(selected, withTime));
-      if (Platform.OS === 'ios') setShow(false);
+      const nextDate =
+        withTime && mode === 'time' && draftDate
+          ? new Date(
+              draftDate.getFullYear(),
+              draftDate.getMonth(),
+              draftDate.getDate(),
+              selected.getHours(),
+              selected.getMinutes(),
+              0,
+              0
+            )
+          : selected;
+
+      onChange(formatInputValue(nextDate, withTime));
+      setShow(false);
+      setDraftDate(null);
       setMode('date');
     }
   }
 
   function openPicker() {
+    setDraftDate(parseDateValue(value));
     setMode('date');
     setShow(true);
   }

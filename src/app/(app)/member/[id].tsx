@@ -16,6 +16,7 @@ import { useMedicationStore } from '../../../store/medicationStore';
 import { Avatar } from '../../../components/ui/Avatar';
 import { Colors, Typography, Spacing, Radius, Shadow } from '../../../theme';
 import type { Database } from '../../../types/database.types';
+import { calculateAge, formatCalendarDate } from '../../../utils';
 
 type FamilyMember  = Database['public']['Tables']['family_members']['Row'];
 type MedicalVisit  = Database['public']['Tables']['medical_visits']['Row'];
@@ -23,10 +24,11 @@ type Prescription  = Database['public']['Tables']['prescriptions']['Row'];
 type MedicalTest   = Database['public']['Tables']['medical_tests']['Row'];
 
 interface MemberData {
-  member:       FamilyMember;
-  recentVisits: MedicalVisit[];
-  activeMeds:   Prescription[];
-  pendingTests: MedicalTest[];
+  member:         FamilyMember;
+  upcomingVisits: MedicalVisit[];
+  recentVisits:   MedicalVisit[];
+  activeMeds:     Prescription[];
+  pendingTests:   MedicalTest[];
 }
 
 export default function MemberDetailRoute() {
@@ -48,10 +50,13 @@ export default function MemberDetailRoute() {
     // Primero intentar del store local
     const localMember = members.find(m => m.id === memberId);
 
-    const [memberRes, visitsRes, medsRes, testsRes] = await Promise.all([
+    const nowIso = new Date().toISOString();
+
+    const [memberRes, upcomingVisitsRes, visitsRes, medsRes, testsRes] = await Promise.all([
       localMember
         ? Promise.resolve({ data: localMember, error: null })
         : supabase.from('family_members').select('*').eq('id', memberId).single(),
+      supabase.from('medical_visits').select('*').eq('family_member_id', memberId).eq('status', 'scheduled').is('deleted_at', null).gt('visit_date', nowIso).order('visit_date', { ascending: true }).limit(3),
       supabase.from('medical_visits').select('*').eq('family_member_id', memberId).eq('status', 'completed').is('deleted_at', null).order('visit_date', { ascending: false }).limit(5),
       supabase.from('prescriptions').select('*').eq('family_member_id', memberId).eq('status', 'active').order('created_at', { ascending: false }),
       supabase.from('medical_tests').select('*').eq('family_member_id', memberId).in('status', ['pending', 'scheduled']).order('due_at', { ascending: true }),
@@ -59,10 +64,11 @@ export default function MemberDetailRoute() {
 
     if (memberRes.data) {
       setData({
-        member:       memberRes.data as FamilyMember,
-        recentVisits: visitsRes.data ?? [],
-        activeMeds:   medsRes.data ?? [],
-        pendingTests: testsRes.data ?? [],
+        member:         memberRes.data as FamilyMember,
+        upcomingVisits: upcomingVisitsRes.data ?? [],
+        recentVisits:   visitsRes.data ?? [],
+        activeMeds:     medsRes.data ?? [],
+        pendingTests:   testsRes.data ?? [],
       });
     }
 
@@ -91,9 +97,9 @@ export default function MemberDetailRoute() {
     );
   }
 
-  const { member, recentVisits, activeMeds, pendingTests } = data;
+  const { member, upcomingVisits, recentVisits, activeMeds, pendingTests } = data;
   const fullName  = `${member.first_name} ${member.last_name ?? ''}`.trim();
-  const age       = member.birth_date ? calcAge(member.birth_date) : null;
+  const age       = calculateAge(member.birth_date);
   const todayDoses = doses.filter(d => d.status === 'pending' || d.status === 'late');
 
   return (
@@ -197,6 +203,36 @@ export default function MemberDetailRoute() {
           </Section>
         )}
 
+        {/* Proximas citas */}
+        {upcomingVisits.length > 0 && (
+          <Section title={`Proximas citas (${upcomingVisits.length})`} accent={Colors.info}>
+            {upcomingVisits.map((visit) => (
+              <TouchableOpacity
+                key={visit.id}
+                style={styles.visitRow}
+                onPress={() => router.push({ pathname: '/(app)/visit/[id]', params: { id: visit.id } })}
+                activeOpacity={0.7}
+              >
+                <View style={styles.visitDate}>
+                  <Text style={styles.visitDay}>
+                    {formatCalendarDate(visit.visit_date, { day: '2-digit', month: 'short' })}
+                  </Text>
+                </View>
+                <View style={styles.visitInfo}>
+                  <Text style={styles.visitDoctor}>{visit.doctor_name ?? 'Cita medica'}</Text>
+                  <Text style={styles.visitSpecialty}>
+                    {visit.specialty ?? visit.reason_for_visit ?? 'Sin detalle clinico'}
+                  </Text>
+                  <Text style={styles.visitDiag}>
+                    {new Date(visit.visit_date).toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit' })}
+                  </Text>
+                </View>
+                <Ionicons name="chevron-forward" size={16} color={Colors.textMuted} />
+              </TouchableOpacity>
+            ))}
+          </Section>
+        )}
+
         {/* Acciones rápidas */}
         <View style={styles.quickActions}>
           <QuickAction icon="add-circle-outline" color={Colors.primary} label="Nueva visita" onPress={() => router.push({ pathname: '/(app)/add-visit', params: { memberId: id, memberName: member.first_name } })} />
@@ -218,7 +254,7 @@ export default function MemberDetailRoute() {
               >
                 <View style={styles.visitDate}>
                   <Text style={styles.visitDay}>
-                    {new Date(v.visit_date).toLocaleDateString('es-CO', { day: '2-digit', month: 'short' })}
+                    {formatCalendarDate(v.visit_date, { day: '2-digit', month: 'short' })}
                   </Text>
                 </View>
                 <View style={styles.visitInfo}>
@@ -236,12 +272,6 @@ export default function MemberDetailRoute() {
       </ScrollView>
     </SafeAreaView>
   );
-}
-
-// ── Helpers ────────────────────────────────────────────────────
-function calcAge(birthDate: string) {
-  const diff = Date.now() - new Date(birthDate).getTime();
-  return Math.floor(diff / (1000 * 60 * 60 * 24 * 365.25));
 }
 
 function Section({ title, accent, children }: { title: string; accent?: string; children: React.ReactNode }) {

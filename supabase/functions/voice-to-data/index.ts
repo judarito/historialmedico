@@ -30,6 +30,8 @@ async function extractVisitData(transcription: string): Promise<object> {
 
   const systemPrompt = `Eres un asistente médico colombiano. Extrae datos médicos estructurados de una nota de voz transcrita.
 Si un campo no se menciona, devuelve null para ese campo.
+Extrae solo lo explícitamente dicho o claramente inferible por contexto inmediato.
+Si aparecen signos vitales, conviértelos a los campos correspondientes y conserva sus unidades correctas.
 Responde ÚNICAMENTE con JSON válido.`;
 
   const userPrompt = `Transcripción: "${transcription}"

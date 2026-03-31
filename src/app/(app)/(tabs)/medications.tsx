@@ -17,6 +17,10 @@ import type { Database } from '../../../types/database.types';
 
 type ScheduleStatus = Database['public']['Tables']['medication_schedules']['Row']['status'];
 
+function getMemberDisplayName(member: Database['public']['Tables']['family_members']['Row']): string {
+  return [member.first_name, member.last_name].filter(Boolean).join(' ').trim();
+}
+
 export default function MedicationsTab() {
   const { members, fetchMembers } = useFamilyStore();
   const { doses, loading, marking, fetchTodayDoses, markDose } = useMedicationStore();
@@ -44,29 +48,54 @@ export default function MedicationsTab() {
 
   const pending = doses.filter(d => d.status === 'pending' || d.status === 'late');
   const done    = doses.filter(d => d.status === 'taken' || d.status === 'skipped');
+  const selectedMemberData = members.find((member) => member.id === selectedMember) ?? null;
 
   return (
     <SafeAreaView style={styles.safe}>
       <View style={styles.header}>
         <Text style={styles.title}>Medicamentos</Text>
-        <Text style={styles.subtitle}>Dosis de hoy</Text>
+        <Text style={styles.subtitle}>
+          {selectedMemberData ? `Dosis de hoy de ${selectedMemberData.first_name}` : 'Dosis de hoy'}
+        </Text>
       </View>
 
-      {/* Selector de miembro */}
       {members.length > 1 && (
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.memberTabs}>
-          {members.map(m => (
-            <TouchableOpacity
-              key={m.id}
-              style={[styles.memberTab, selectedMember === m.id && styles.memberTabActive]}
-              onPress={() => selectMember(m.id)}
-            >
-              <Text style={[styles.memberTabText, selectedMember === m.id && styles.memberTabTextActive]}>
-                {m.first_name}
-              </Text>
-            </TouchableOpacity>
-          ))}
-        </ScrollView>
+        <View style={styles.selectorSection}>
+          <Text style={styles.selectorLabel}>Selecciona el familiar que quieres revisar</Text>
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.memberTabs}
+          >
+            {members.map(m => {
+              const isActive = selectedMember === m.id;
+
+              return (
+                <TouchableOpacity
+                  key={m.id}
+                  style={[styles.memberTab, isActive && styles.memberTabActive]}
+                  onPress={() => selectMember(m.id)}
+                  activeOpacity={0.85}
+                >
+                  <View style={[styles.memberAvatar, isActive && styles.memberAvatarActive]}>
+                    <Text style={[styles.memberAvatarText, isActive && styles.memberAvatarTextActive]}>
+                      {m.first_name.charAt(0).toUpperCase()}
+                    </Text>
+                  </View>
+
+                  <View style={styles.memberTabCopy}>
+                    <Text style={[styles.memberTabText, isActive && styles.memberTabTextActive]}>
+                      {getMemberDisplayName(m)}
+                    </Text>
+                    <Text style={[styles.memberTabHint, isActive && styles.memberTabHintActive]}>
+                      {isActive ? 'Mostrando sus dosis de hoy' : 'Toca para ver sus dosis'}
+                    </Text>
+                  </View>
+                </TouchableOpacity>
+              );
+            })}
+          </ScrollView>
+        </View>
       )}
 
       {loading
@@ -77,7 +106,11 @@ export default function MedicationsTab() {
               <View style={styles.empty}>
                 <Ionicons name="checkmark-circle-outline" size={56} color={Colors.healthy} />
                 <Text style={styles.emptyTitle}>Sin dosis pendientes</Text>
-                <Text style={styles.emptyText}>No hay medicamentos programados para hoy.</Text>
+                <Text style={styles.emptyText}>
+                  {selectedMemberData
+                    ? `No hay medicamentos programados para hoy para ${selectedMemberData.first_name}.`
+                    : 'No hay medicamentos programados para hoy.'}
+                </Text>
               </View>
             )}
 
@@ -166,15 +199,73 @@ const styles = StyleSheet.create({
   header: { paddingHorizontal: Spacing.base, paddingTop: Spacing.base, paddingBottom: Spacing.sm },
   title: { color: Colors.textPrimary, fontSize: Typography.xl, fontWeight: Typography.bold },
   subtitle: { color: Colors.textSecondary, fontSize: Typography.sm },
-  memberTabs: { paddingHorizontal: Spacing.base, paddingBottom: Spacing.sm, gap: Spacing.sm },
-  memberTab: {
-    paddingHorizontal: Spacing.md, paddingVertical: Spacing.xs,
-    backgroundColor: Colors.surface, borderRadius: Radius.full,
-    borderWidth: 1, borderColor: Colors.border,
+  selectorSection: { gap: Spacing.sm, paddingBottom: Spacing.sm },
+  selectorLabel: {
+    color: Colors.textSecondary,
+    fontSize: Typography.sm,
+    paddingHorizontal: Spacing.base,
   },
-  memberTabActive: { backgroundColor: Colors.primary + '22', borderColor: Colors.primary },
-  memberTabText: { color: Colors.textSecondary, fontSize: Typography.sm, fontWeight: Typography.medium },
-  memberTabTextActive: { color: Colors.primary },
+  memberTabs: {
+    paddingHorizontal: Spacing.base,
+    gap: Spacing.sm,
+    alignItems: 'center',
+  },
+  memberTab: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.sm,
+    minHeight: 68,
+    minWidth: 170,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.sm,
+    backgroundColor: Colors.surface,
+    borderRadius: Radius.xl,
+    borderWidth: 1,
+    borderColor: Colors.border,
+  },
+  memberTabActive: {
+    backgroundColor: Colors.primary + '16',
+    borderColor: Colors.primary,
+  },
+  memberAvatar: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: Colors.background,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: Colors.border,
+  },
+  memberAvatarActive: {
+    backgroundColor: Colors.primary,
+    borderColor: Colors.primary,
+  },
+  memberAvatarText: {
+    color: Colors.textSecondary,
+    fontSize: Typography.sm,
+    fontWeight: Typography.bold,
+  },
+  memberAvatarTextActive: {
+    color: Colors.white,
+  },
+  memberTabCopy: {
+    flex: 1,
+    gap: 2,
+  },
+  memberTabText: {
+    color: Colors.textPrimary,
+    fontSize: Typography.sm,
+    fontWeight: Typography.semibold,
+  },
+  memberTabTextActive: { color: Colors.white },
+  memberTabHint: {
+    color: Colors.textMuted,
+    fontSize: Typography.xs,
+  },
+  memberTabHintActive: {
+    color: Colors.primaryLight,
+  },
   list: { paddingHorizontal: Spacing.base, paddingBottom: Spacing.xxxl, gap: Spacing.sm },
   sectionLabel: { color: Colors.textSecondary, fontSize: Typography.sm, fontWeight: Typography.semibold, marginBottom: 4 },
   empty: { alignItems: 'center', marginTop: 80, gap: Spacing.md },

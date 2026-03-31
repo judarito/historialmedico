@@ -19,9 +19,17 @@ import { Audio } from 'expo-av';
 import { supabase } from '../../../services/supabase';
 import { Colors, Typography, Spacing, Radius, Shadow } from '../../../theme';
 import type { Database } from '../../../types/database.types';
+import { formatCalendarDate } from '../../../utils';
 
 type MedicalVisit   = Database['public']['Tables']['medical_visits']['Row'];
 type MedicalDocument = Database['public']['Tables']['medical_documents']['Row'];
+type VisitStatus = Database['public']['Tables']['medical_visits']['Row']['status'];
+type DeleteAttachmentResult = {
+  file_path?: string | null;
+  detached_prescriptions?: number | null;
+  detached_tests?: number | null;
+  preserved_clinical_data?: boolean | null;
+};
 
 const STATUS_LABEL: Record<string, { label: string; color: string; icon: any }> = {
   pending:   { label: 'Pendiente',   color: Colors.warning, icon: 'time-outline' },
@@ -61,6 +69,16 @@ function getDocumentIcon(doc: MedicalDocument): keyof typeof Ionicons.glyphMap {
   return 'document-attach-outline';
 }
 
+function getDocumentReferenceDate(doc: MedicalDocument): string | null {
+  return doc.captured_at ?? doc.created_at;
+}
+
+function compareDocumentsByReferenceDate(a: MedicalDocument, b: MedicalDocument): number {
+  const aTime = new Date(getDocumentReferenceDate(a) ?? a.created_at).getTime();
+  const bTime = new Date(getDocumentReferenceDate(b) ?? b.created_at).getTime();
+  return bTime - aTime;
+}
+
 function formatAudioTime(ms: number): string {
   const totalSeconds = Math.max(0, Math.floor(ms / 1000));
   const minutes = Math.floor(totalSeconds / 60);
@@ -81,9 +99,10 @@ function showConfirm(params: {
   title: string;
   message: string;
   confirmLabel?: string;
+  confirmStyle?: 'default' | 'destructive';
   onConfirm: () => void;
 }) {
-  const { title, message, confirmLabel = 'Aceptar', onConfirm } = params;
+  const { title, message, confirmLabel = 'Aceptar', confirmStyle = 'destructive', onConfirm } = params;
 
   if (Platform.OS === 'web') {
     const accepted = globalThis.confirm?.([title, message].filter(Boolean).join('\n\n')) ?? false;
@@ -93,7 +112,7 @@ function showConfirm(params: {
 
   Alert.alert(title, message, [
     { text: 'Cancelar', style: 'cancel' },
-    { text: confirmLabel, style: 'destructive', onPress: onConfirm },
+    { text: confirmLabel, style: confirmStyle, onPress: onConfirm },
   ]);
 }
 
@@ -125,6 +144,7 @@ export default function VisitDetailRoute() {
   const [audioDurationMillis, setAudioDurationMillis] = useState(0);
   const [deletingDocId, setDeletingDocId] = useState<string | null>(null);
   const [deletingVisit, setDeletingVisit] = useState(false);
+  const [updatingStatus, setUpdatingStatus] = useState<VisitStatus | null>(null);
 
   // Recargar al volver del scan (después de adjuntar un documento)
   useFocusEffect(useCallback(() => { load(); }, [id]));
@@ -148,7 +168,7 @@ export default function VisitDetailRoute() {
         .order('created_at', { ascending: false }),
     ]);
     if (visitRes.data) setVisit(visitRes.data);
-    setDocs(docsRes.data ?? []);
+    setDocs([...(docsRes.data ?? [])].sort(compareDocumentsByReferenceDate));
     setLoading(false);
     setRefreshing(false);
   }
@@ -161,6 +181,46 @@ export default function VisitDetailRoute() {
         memberId: visit.family_member_id,
         visitId:  visit.id,
       },
+    });
+  }
+
+  async function updateVisitStatus(nextStatus: VisitStatus) {
+    if (!visit) return;
+
+    setUpdatingStatus(nextStatus);
+    try {
+      const { error } = await supabase
+        .from('medical_visits')
+        .update({ status: nextStatus })
+        .eq('id', visit.id);
+
+      if (error) {
+        showAlert('No se pudo actualizar', error.message);
+        return;
+      }
+
+      setVisit((current) => current ? { ...current, status: nextStatus } : current);
+    } finally {
+      setUpdatingStatus(null);
+    }
+  }
+
+  function confirmCompleteVisit() {
+    showConfirm({
+      title: 'Marcar como realizada',
+      message: 'La cita pasara al historial como visita completada y se limpiaran recordatorios futuros pendientes.',
+      confirmLabel: 'Marcar',
+      confirmStyle: 'default',
+      onConfirm: () => { void updateVisitStatus('completed'); },
+    });
+  }
+
+  function confirmCancelVisit() {
+    showConfirm({
+      title: 'Cancelar cita',
+      message: 'La cita se marcara como cancelada y dejaran de salir recordatorios pendientes.',
+      confirmLabel: 'Cancelar cita',
+      onConfirm: () => { void updateVisitStatus('cancelled'); },
     });
   }
 
@@ -236,7 +296,7 @@ export default function VisitDetailRoute() {
   function confirmDeleteDocument(doc: MedicalDocument) {
     showConfirm({
       title: 'Eliminar adjunto',
-      message: 'Se eliminará este archivo de la visita. Si ya generó medicamentos o exámenes confirmados, el sistema bloqueará el borrado.',
+      message: 'Se eliminará el archivo original de esta visita. Si ya generó medicamentos o exámenes, esos datos clínicos se conservarán y solo se quitará el adjunto.',
       confirmLabel: 'Eliminar',
       onConfirm: () => { void deleteDocument(doc); },
     });
@@ -246,6 +306,8 @@ export default function VisitDetailRoute() {
     setDeletingDocId(doc.id);
     try {
       let deletedFilePath = doc.file_path;
+      let detachedPrescriptionCount = 0;
+      let detachedTestCount = 0;
 
       const { data, error } = await supabase.rpc('delete_medical_document_attachment', {
         p_document_id: doc.id,
@@ -257,29 +319,55 @@ export default function VisitDetailRoute() {
       }
 
       if (error && isMissingRpc(error)) {
-        const [{ data: linkedPrescriptions, error: rxError }, { data: linkedTests, error: testsError }] = await Promise.all([
+        const [
+          { data: linkedPrescriptions, error: rxError },
+          { data: linkedTestsBySource, error: testsSourceError },
+          { data: linkedTestsByResult, error: testsResultError },
+        ] = await Promise.all([
           supabase
             .from('prescriptions')
             .select('id')
             .eq('medical_document_id', doc.id)
-            .limit(1),
+            .limit(200),
           supabase
             .from('medical_tests')
             .select('id')
             .eq('medical_document_id', doc.id)
-            .limit(1),
+            .limit(200),
+          supabase
+            .from('medical_tests')
+            .select('id')
+            .eq('result_document_id', doc.id)
+            .limit(200),
         ]);
 
-        if (rxError || testsError) {
-          throw rxError ?? testsError;
+        if (rxError || testsSourceError || testsResultError) {
+          throw rxError ?? testsSourceError ?? testsResultError;
         }
 
-        if ((linkedPrescriptions?.length ?? 0) > 0 || (linkedTests?.length ?? 0) > 0) {
-          showAlert(
-            'No se puede eliminar',
-            'Este adjunto ya generó datos clínicos confirmados.'
-          );
-          return;
+        detachedPrescriptionCount = linkedPrescriptions?.length ?? 0;
+        detachedTestCount = new Set([
+          ...(linkedTestsBySource ?? []).map((item) => item.id),
+          ...(linkedTestsByResult ?? []).map((item) => item.id),
+        ]).size;
+
+        const [{ error: unlinkRxError }, { error: unlinkTestsSourceError }, { error: unlinkTestsResultError }] = await Promise.all([
+          supabase
+            .from('prescriptions')
+            .update({ medical_document_id: null })
+            .eq('medical_document_id', doc.id),
+          supabase
+            .from('medical_tests')
+            .update({ medical_document_id: null })
+            .eq('medical_document_id', doc.id),
+          supabase
+            .from('medical_tests')
+            .update({ result_document_id: null })
+            .eq('result_document_id', doc.id),
+        ]);
+
+        if (unlinkRxError || unlinkTestsSourceError || unlinkTestsResultError) {
+          throw unlinkRxError ?? unlinkTestsSourceError ?? unlinkTestsResultError;
         }
 
         const { error: deleteError } = await supabase
@@ -292,9 +380,13 @@ export default function VisitDetailRoute() {
           return;
         }
       } else {
-        deletedFilePath = (data as { file_path?: string } | null)?.file_path ?? doc.file_path;
+        const result = (data ?? {}) as DeleteAttachmentResult;
+        deletedFilePath = result.file_path ?? doc.file_path;
+        detachedPrescriptionCount = result.detached_prescriptions ?? 0;
+        detachedTestCount = result.detached_tests ?? 0;
       }
 
+      let storageWarning = '';
       if (deletedFilePath) {
         const { error: storageError } = await supabase.storage
           .from('medical-documents')
@@ -302,10 +394,7 @@ export default function VisitDetailRoute() {
 
         if (storageError) {
           console.warn('storage remove error:', storageError);
-          showAlert(
-            'Adjunto eliminado',
-            'El adjunto se quitó del historial, pero no se pudo limpiar el archivo original en Storage.'
-          );
+          storageWarning = 'El adjunto se quitó del historial, pero no se pudo limpiar el archivo original en Storage.';
         }
       }
 
@@ -314,6 +403,28 @@ export default function VisitDetailRoute() {
       }
 
       setDocs((current) => current.filter((item) => item.id !== doc.id));
+
+      const successNotes: string[] = [];
+      if (detachedPrescriptionCount > 0 || detachedTestCount > 0) {
+        const preservedParts: string[] = [];
+        if (detachedPrescriptionCount > 0) {
+          preservedParts.push(
+            `${detachedPrescriptionCount} ${detachedPrescriptionCount === 1 ? 'medicamento quedó registrado' : 'medicamentos quedaron registrados'}`
+          );
+        }
+        if (detachedTestCount > 0) {
+          preservedParts.push(
+            `${detachedTestCount} ${detachedTestCount === 1 ? 'examen quedó registrado' : 'exámenes quedaron registrados'}`
+          );
+        }
+        successNotes.push(`Se conservó la información clínica: ${preservedParts.join(' y ')}.`);
+      }
+      if (storageWarning) {
+        successNotes.push(storageWarning);
+      }
+      if (successNotes.length > 0) {
+        showAlert('Adjunto eliminado', successNotes.join(' '));
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Ocurrió un error inesperado.';
       showAlert('No se pudo eliminar', message);
@@ -406,6 +517,9 @@ export default function VisitDetailRoute() {
   const visitTimeFormatted = new Date(visit.visit_date).toLocaleTimeString('es-CO', {
     hour: '2-digit', minute: '2-digit',
   });
+  const visitStatusMeta = getVisitStatusMeta(visit.status);
+  const isScheduledVisit = visit.status === 'scheduled';
+  const isCancelledVisit = visit.status === 'cancelled';
 
   return (
     <SafeAreaView style={styles.safe}>
@@ -415,7 +529,7 @@ export default function VisitDetailRoute() {
           <Ionicons name="arrow-back" size={22} color={Colors.textPrimary} />
         </TouchableOpacity>
         <View style={styles.headerCenter}>
-          <Text style={styles.headerTitle}>Detalle de visita</Text>
+          <Text style={styles.headerTitle}>{isScheduledVisit ? 'Detalle de cita' : 'Detalle de visita'}</Text>
           <Text style={styles.headerSub} numberOfLines={1}>
             {visit.doctor_name ?? 'Sin médico'}
           </Text>
@@ -461,6 +575,15 @@ export default function VisitDetailRoute() {
             </View>
           </View>
 
+          <View style={styles.visitStatusRow}>
+            <View style={[styles.visitStatusBadge, { backgroundColor: visitStatusMeta.backgroundColor }]}>
+              <Ionicons name={visitStatusMeta.icon} size={14} color={visitStatusMeta.color} />
+              <Text style={[styles.visitStatusText, { color: visitStatusMeta.color }]}>
+                {visitStatusMeta.label}
+              </Text>
+            </View>
+          </View>
+
           <View style={styles.divider} />
 
           {/* Campos informativos */}
@@ -483,6 +606,56 @@ export default function VisitDetailRoute() {
             <InfoRow icon="chatbox-ellipses-outline" label="Notas" value={visit.notes} multiline />
           )}
         </View>
+
+        {isScheduledVisit && (
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>Gestion de la cita</Text>
+            <View style={styles.scheduledActions}>
+              <TouchableOpacity
+                style={[styles.statusActionBtn, styles.completeActionBtn]}
+                onPress={confirmCompleteVisit}
+                disabled={updatingStatus !== null}
+                activeOpacity={0.8}
+              >
+                {updatingStatus === 'completed' ? (
+                  <ActivityIndicator color={Colors.white} size="small" />
+                ) : (
+                  <>
+                    <Ionicons name="checkmark-circle-outline" size={18} color={Colors.white} />
+                    <Text style={styles.statusActionText}>Marcar como realizada</Text>
+                  </>
+                )}
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[styles.statusActionBtn, styles.cancelActionBtn]}
+                onPress={confirmCancelVisit}
+                disabled={updatingStatus !== null}
+                activeOpacity={0.8}
+              >
+                {updatingStatus === 'cancelled' ? (
+                  <ActivityIndicator color={Colors.alert} size="small" />
+                ) : (
+                  <>
+                    <Ionicons name="close-circle-outline" size={18} color={Colors.alert} />
+                    <Text style={styles.cancelActionText}>Cancelar cita</Text>
+                  </>
+                )}
+              </TouchableOpacity>
+            </View>
+          </View>
+        )}
+
+        {isCancelledVisit && (
+          <View style={styles.section}>
+            <View style={styles.cancelledInfoBox}>
+              <Ionicons name="alert-circle-outline" size={18} color={Colors.alert} />
+              <Text style={styles.cancelledInfoText}>
+                Esta cita quedo cancelada y ya no generara recordatorios pendientes.
+              </Text>
+            </View>
+          </View>
+        )}
 
         {/* ── Signos vitales ── */}
         {hasVitals(visit) && (
@@ -548,9 +721,7 @@ export default function VisitDetailRoute() {
                           {getDocumentLabel(doc)}
                         </Text>
                         <Text style={styles.docDate}>
-                          {new Date(doc.created_at).toLocaleDateString('es-CO', {
-                            day: '2-digit', month: 'short', year: 'numeric',
-                          })}
+                          {formatCalendarDate(getDocumentReferenceDate(doc))}
                         </Text>
                       </View>
                       <View style={[styles.statusBadge, { backgroundColor: st.color + '22' }]}>
@@ -669,6 +840,39 @@ function hasVitals(v: MedicalVisit) {
     v.blood_pressure != null || v.heart_rate != null;
 }
 
+function getVisitStatusMeta(status: VisitStatus) {
+  switch (status) {
+    case 'scheduled':
+      return {
+        label: 'Cita programada',
+        color: Colors.info,
+        backgroundColor: Colors.infoBg,
+        icon: 'time-outline' as const,
+      };
+    case 'cancelled':
+      return {
+        label: 'Cancelada',
+        color: Colors.alert,
+        backgroundColor: Colors.alertBg,
+        icon: 'close-circle-outline' as const,
+      };
+    case 'completed':
+      return {
+        label: 'Completada',
+        color: Colors.healthy,
+        backgroundColor: Colors.healthyBg,
+        icon: 'checkmark-circle-outline' as const,
+      };
+    default:
+      return {
+        label: 'Borrador',
+        color: Colors.warning,
+        backgroundColor: Colors.warningBg,
+        icon: 'document-text-outline' as const,
+      };
+  }
+}
+
 function InfoRow({ icon, label, value, multiline }: {
   icon: any; label: string; value: string; multiline?: boolean;
 }) {
@@ -742,6 +946,17 @@ const styles = StyleSheet.create({
   },
   dateMain: { color: Colors.textPrimary,   fontSize: Typography.base, fontWeight: Typography.semibold, textTransform: 'capitalize' },
   dateSub:  { color: Colors.textSecondary, fontSize: Typography.xs },
+  visitStatusRow: { marginTop: Spacing.sm },
+  visitStatusBadge: {
+    alignSelf: 'flex-start',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    borderRadius: Radius.full,
+    paddingHorizontal: Spacing.sm,
+    paddingVertical: 5,
+  },
+  visitStatusText: { fontSize: Typography.xs, fontWeight: Typography.semibold },
   divider:  { height: 1, backgroundColor: Colors.border, marginVertical: 4 },
   infoRow:  { flexDirection: 'row', alignItems: 'flex-start', gap: Spacing.sm },
   infoIcon: { marginTop: 3 },
@@ -757,6 +972,48 @@ const styles = StyleSheet.create({
 
   vitalsGrid: {
     flexDirection: 'row', flexWrap: 'wrap', gap: Spacing.sm,
+  },
+  scheduledActions: { gap: Spacing.sm },
+  statusActionBtn: {
+    minHeight: 48,
+    borderRadius: Radius.md,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexDirection: 'row',
+    gap: Spacing.xs,
+    paddingHorizontal: Spacing.md,
+  },
+  completeActionBtn: {
+    backgroundColor: Colors.healthy,
+  },
+  cancelActionBtn: {
+    backgroundColor: Colors.alertBg,
+    borderWidth: 1,
+    borderColor: Colors.alert + '33',
+  },
+  statusActionText: {
+    color: Colors.white,
+    fontSize: Typography.sm,
+    fontWeight: Typography.semibold,
+  },
+  cancelActionText: {
+    color: Colors.alert,
+    fontSize: Typography.sm,
+    fontWeight: Typography.semibold,
+  },
+  cancelledInfoBox: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: Spacing.sm,
+    borderRadius: Radius.md,
+    backgroundColor: Colors.alertBg,
+    padding: Spacing.md,
+  },
+  cancelledInfoText: {
+    flex: 1,
+    color: Colors.textSecondary,
+    fontSize: Typography.sm,
+    lineHeight: 20,
   },
   vitalChip: {
     flexDirection: 'row', alignItems: 'center', gap: 6,

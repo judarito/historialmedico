@@ -1,49 +1,103 @@
 # Family Health Tracker — Flujos Detallados
 
-## Flujo 1: Crear Tenant
+## Flujo 1: Crear Tenant y Familia Inicial
 
 ```
-App                     Supabase Auth           PostgreSQL
- |                            |                      |
- |-- register(email,pass) --> |                      |
- |                            |-- INSERT auth.users  |
- |                            |-- TRIGGER ---------->|
- |                            |              INSERT profiles (sin tenant_id)
- |<-- session + JWT --------- |                      |
- |                            |                      |
- |-- createTenant(name,slug) -------- RPC ---------->|
- |                                    create_tenant_with_owner():
- |                                    1. INSERT tenants
- |                                    2. INSERT tenant_users (owner)
- |                                    3. UPDATE profiles.tenant_id
- |<-- { tenant_id } -------------------------------- |
+App                         Supabase Auth           PostgreSQL
+ |                                |                      |
+ |-- register(email,pass) ------> |                      |
+ |                                |-- INSERT auth.users  |
+ |                                |-- TRIGGER ---------->|
+ |                                |              INSERT profiles (sin tenant_id)
+ |<-- session + JWT ------------- |                      |
+ |                                |                      |
+ |-- createTenant(name,slug,plan) ------ RPC ---------> |
+ |                                        create_tenant_with_owner():
+ |                                        1. valida que la cuenta no pertenezca ya a otra familia
+ |                                        2. INSERT tenants (con plan)
+ |                                        3. INSERT tenant_users (owner)
+ |                                        4. UPDATE profiles.tenant_id
+ |                                        5. INSERT families (familia inicial)
+ |<-- { tenant_id, family_id, plan } ----------------- |
 ```
 
 **Código React Native:**
 ```typescript
 const { data } = await supabase.rpc("create_tenant_with_owner", {
   p_name: "Familia García",
-  p_slug: "familia-garcia"
+  p_slug: "familia-garcia",
+  p_plan: "free"
 });
-// data.tenant_id disponible
+// data.tenant_id y data.family_id disponibles
 ```
+
+**Notas actuales:**
+- La selección de plan ocurre en onboarding al crear la familia, no en `register`.
+- Si el usuario ya fue invitado a una familia existente, no debería pasar por este flujo.
+- Si existía un tenant previo sin familia por un fallo antiguo, la misma RPC ahora completa esa familia faltante en vez de crear otro tenant.
+- Antes de `signUp`, la app consulta `check_auth_email_status` para no dejar pasar correos ya registrados en Supabase Auth.
 
 ---
 
-## Flujo 2: Asociar Usuario al Tenant
+## Flujo 2: Invitar Cuidador a la Familia
+
+### Caso A: el correo ya tiene cuenta
 
 ```
-Owner                   Supabase                  Nuevo Usuario
-  |                        |                            |
-  |-- inviteUser(email) -> |-- INSERT tenant_users      |
-  |                        |   (is_active=false)        |
-  |                        |-- send email invite -----> |
-  |                        |                            |-- click link
-  |                        |<-- accept_invite() ------- |
-  |                        |-- UPDATE tenant_users      |
-  |                        |   (is_active=true,         |
-  |                        |    joined_at=NOW())        |
+Admin / Owner            Supabase
+    |                       |
+    |-- inviteUser(email) ->|-- lookup profiles by email
+    |                       |-- INSERT/UPDATE tenant_users
+    |                       |-- UPDATE profiles.tenant_id
+    |<-- acceso inmediato --|
 ```
+
+### Caso B: el correo aún no tiene cuenta
+
+```
+Admin / Owner            Supabase                  Cuidador invitado
+    |                       |                              |
+    |-- inviteUser(email) ->|-- INSERT tenant_invitations |
+    |<-- pending invite ----|                              |
+    |                       |                              |-- register(email, pass)
+    |                       |                              |-- confirm email
+    |                       |<----- login -----------------|
+    |                       |-- claim_pending_tenant_invitations()
+    |                       |-- INSERT tenant_users
+    |                       |-- UPDATE profiles.tenant_id
+    |<-- acceso activo -----|                              |
+```
+
+**Notas actuales:**
+- La invitación se identifica por el correo exacto.
+- El cuidador debe registrarse con ese mismo correo para reclamar la invitación.
+- Hoy la app asume una sola familia activa por cuenta.
+- El reclamo automático corre al iniciar sesión/cargar la app desde `useFamilyStore.fetchTenantAndFamily()`.
+- `profile.tsx` muestra tanto los usuarios con acceso como las invitaciones pendientes.
+- El owner puede invitar como `admin`, `member` o `viewer`; un admin solo puede invitar y gestionar `member` o `viewer`.
+- La misma pantalla ya permite cambiar rol, cancelar invitaciones pendientes y revocar accesos activos.
+- Si la invitación se reclama correctamente, el cuidador entra directo a la app y no pasa por la selección de plan.
+
+---
+
+## Flujo 2B: Recuperar Contraseña
+
+```
+Usuario                  App móvil                 Supabase Auth
+   |                        |                            |
+   |-- "Olvidé..." -------> |                            |
+   |                        |-- resetPasswordForEmail -->|
+   |                        |<-- email recovery ---------|
+   |<----- abre deep link familyhealth://reset-password --|
+   |                        |-- setSession(access,refresh)
+   |                        |-- updateUser(password) ---->|
+   |                        |<-- ok ----------------------|
+   |<-- entra a onboarding/app según tenant -------------|
+```
+
+**Notas actuales:**
+- El cliente React Native parsea manualmente el deep link de recovery y hace `supabase.auth.setSession()`.
+- Después de guardar la nueva contraseña, la app vuelve a resolver onboarding/app como si fuera un login normal.
 
 ---
 
@@ -97,6 +151,37 @@ const { data: visit } = await supabase
   })
   .select().single();
 ```
+
+**Notas actuales:**
+- Si `visit_date` queda en el futuro, la app la guarda con `status='scheduled'`.
+- Si la fecha ya paso o es inmediata, se guarda como `status='completed'`.
+- Las citas futuras generan un reminder automatico en `reminders` y lo veras luego en la campanita.
+
+---
+
+## Flujo 4B: Cita Futura y Notificaciones
+
+```
+Usuario                    App movil                 PostgreSQL / Supabase
+   |                           |                              |
+   |-- crea visita futura ---> |-- INSERT medical_visits ---->|
+   |                           |                              |-- trigger sync_medical_visit_appointment_reminder()
+   |                           |                              |-- UPSERT reminders(reminder_type='appointment')
+   |                           |                              |
+   |<-- ve cita en perfil -----|                              |
+   |                           |<== Realtime reminders =======|
+   |                           |-- badge campanita / inbox -->|
+   |                           |                              |
+   |                           |<-- pg_cron + send-notifications() -- when due
+   |<-- push en celular -------|                              |
+   |-- toca push ------------> |-- abre visita o inbox ------>|
+```
+
+**Notas actuales:**
+- El reminder de cita se calcula automaticamente segun cercania de la cita: 24h, 2h, 15m o al momento de la cita.
+- `notification_reads` guarda el estado de lectura por usuario para que la campanita no sea compartida entre cuidadores.
+- El inbox usa RPC `get_notification_feed` y `get_unread_notification_count`, y se refresca por Realtime sobre `reminders` y `notification_reads`.
+- Desde `visit/[id]` la cita programada se puede marcar como realizada o cancelada.
 
 ---
 

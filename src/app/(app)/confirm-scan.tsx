@@ -14,6 +14,17 @@ import { useLocalSearchParams, router } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { supabase } from '../../services/supabase';
 import { Colors, Typography, Spacing, Radius } from '../../theme';
+import {
+  buildMedicalVisitUpdate,
+  formatCalendarDate,
+  getDateOnlyKey,
+  getVisitReviewItems,
+  getVitalsReviewItems,
+  hasMeaningfulVisitData,
+  normalizeExtractedVisitData,
+  toStoredIso,
+  type NormalizedExtractedVisitData,
+} from '../../utils';
 
 interface ExtractedMed {
   medication_name: string;
@@ -30,6 +41,22 @@ interface ExtractedTest {
   test_name: string;
   category:  string;
   instructions?: string;
+}
+
+function shouldPersistDateTime(value?: string | null): boolean {
+  return Boolean(value && /T\d{2}:\d{2}/.test(value));
+}
+
+function buildDocumentMetadataUpdate(value?: string | null) {
+  if (!value) return null;
+
+  const storedDate = toStoredIso(value, shouldPersistDateTime(value));
+  if (!storedDate) return null;
+
+  return {
+    captured_at: storedDate,
+    title: `Formula ${formatCalendarDate(value)}`,
+  };
 }
 
 export default function ConfirmScanRoute() {
@@ -49,6 +76,7 @@ export default function ConfirmScanRoute() {
   const [attempts,          setAttempts]          = useState(0);
   const [errorMessage,      setErrorMessage]      = useState(processingError ?? '');
   const [detectedVisitDate, setDetectedVisitDate] = useState<string | null>(null);
+  const [visitData,         setVisitData]         = useState<NormalizedExtractedVisitData | null>(null);
 
   useEffect(() => {
     if (manual === '1') {
@@ -75,13 +103,14 @@ export default function ConfirmScanRoute() {
         const parsed = data.parsed_json as any;
         setMeds(parsed?.medications ?? []);
         setTests(parsed?.tests ?? []);
+        setVisitData(normalizeExtractedVisitData(parsed));
         setErrorMessage('');
 
         // Si la IA detectó una fecha en la fórmula, compararla con la fecha de la visita
         const aiDate = parsed?.visit_date as string | null | undefined;
         if (aiDate) {
-          const aiDateOnly   = toDateOnly(aiDate);
-          const visitDateOnly = toDateOnly(visitDate ?? '');
+          const aiDateOnly = getDateOnlyKey(aiDate);
+          const visitDateOnly = getDateOnlyKey(visitDate ?? '');
           if (aiDateOnly && aiDateOnly !== visitDateOnly) {
             setDetectedVisitDate(aiDate);
           }
@@ -112,19 +141,60 @@ export default function ConfirmScanRoute() {
       interval_hours: (m.interval_hours != null && m.interval_hours > 0) ? m.interval_hours : null,
     }));
 
+    const resolvedVisitDate = detectedVisitDate
+      ? visitData?.visit_date ?? detectedVisitDate
+      : null;
+
+    const hasVisitUpdates = hasMeaningfulVisitData({
+      ...(visitData ?? {}),
+      visit_date: resolvedVisitDate,
+    });
+
+    if (visitId && hasVisitUpdates) {
+      const visitUpdates = buildMedicalVisitUpdate({
+        ...(visitData ?? {}),
+        visit_date: resolvedVisitDate,
+      }, {
+        includeVisitDate: Boolean(resolvedVisitDate),
+      });
+      if (Object.keys(visitUpdates).length > 0) {
+        const { error: visitError } = await supabase
+          .from('medical_visits')
+          .update(visitUpdates)
+          .eq('id', visitId);
+
+        if (visitError) {
+          setSaving(false);
+          Alert.alert('Error al actualizar la visita', visitError.message);
+          return;
+        }
+      }
+    }
+
+    const documentMetadataUpdate = buildDocumentMetadataUpdate(resolvedVisitDate);
+    if (documentMetadataUpdate) {
+      const { error: documentError } = await supabase
+        .from('medical_documents')
+        .update(documentMetadataUpdate)
+        .eq('id', documentId);
+
+      if (documentError) {
+        setSaving(false);
+        Alert.alert('Error al actualizar el documento', documentError.message);
+        return;
+      }
+    }
+
     const { error } = await supabase.rpc('confirm_document_and_create_records', {
       p_document_id: documentId,
       p_medications: safeMeds as any,
       p_tests:       tests as any,
     });
 
-    if (error) { setSaving(false); Alert.alert('Error al guardar', error.message); return; }
-
-    // Si la IA detectó una fecha distinta a la de la visita, actualizarla
-    if (detectedVisitDate && visitId) {
-      const newDate = new Date(detectedVisitDate).toISOString();
-      await supabase.from('medical_visits').update({ visit_date: newDate }).eq('id', visitId);
-      await supabase.from('medical_documents').update({ captured_at: newDate }).eq('id', documentId);
+    if (error) {
+      setSaving(false);
+      Alert.alert('Error al guardar', error.message);
+      return;
     }
 
     setSaving(false);
@@ -133,8 +203,10 @@ export default function ConfirmScanRoute() {
     Alert.alert(
       '¡Listo!',
       hasEntries
-        ? `Se guardaron ${meds.length} medicamento(s) y ${tests.length} examen(es).`
-        : 'La foto quedo confirmada sin registros estructurados. Puedes completar la visita manualmente despues.',
+        ? `Se guardaron ${meds.length} medicamento(s) y ${tests.length} examen(es)${hasVisitUpdates ? ', y se actualizó la visita.' : '.'}`
+        : hasVisitUpdates
+          ? 'Se actualizaron los datos de la visita con la información extraída.'
+          : 'La foto quedo confirmada sin registros estructurados. Puedes completar la visita manualmente despues.',
       [{ text: 'Ir a medicamentos', onPress: () => router.replace('/(app)/(tabs)/medications') }]
     );
   }
@@ -209,6 +281,13 @@ export default function ConfirmScanRoute() {
   }
 
   // ── Ready — editar y confirmar ────────────────────────────────
+  const visitItems = getVisitReviewItems(visitData);
+  const vitalItems = getVitalsReviewItems(visitData);
+  const hasVisitData = hasMeaningfulVisitData({
+    ...(visitData ?? {}),
+    visit_date: detectedVisitDate ? visitData?.visit_date ?? detectedVisitDate : null,
+  });
+
   return (
     <SafeAreaView style={styles.safe}>
       <View style={styles.header}>
@@ -227,7 +306,7 @@ export default function ConfirmScanRoute() {
         <View style={styles.visitBadge}>
           <Ionicons name="link-outline" size={14} color={Colors.primary} />
           <Text style={styles.visitBadgeText}>
-            Visita: {new Date(visitDate).toLocaleDateString('es-CO', { day: '2-digit', month: 'short', year: 'numeric' })}
+            Visita: {formatCalendarDate(visitDate)}
             {doctorName ? ` · ${doctorName}` : ''}
           </Text>
         </View>
@@ -247,10 +326,42 @@ export default function ConfirmScanRoute() {
             <Text style={[styles.warningText, { flex: 1 }]}>
               La IA detectó la fecha{' '}
               <Text style={{ fontWeight: '700', color: Colors.textPrimary }}>
-                {new Date(detectedVisitDate).toLocaleDateString('es-CO', { day: '2-digit', month: 'short', year: 'numeric' })}
+                {formatCalendarDate(detectedVisitDate)}
               </Text>
               {' '}en la fórmula.{'\n'}Al confirmar, la visita y el documento quedarán con esa fecha.
             </Text>
+          </View>
+        )}
+
+        {hasVisitData && (
+          <View style={styles.section}>
+            <View style={styles.sectionHeader}>
+              <Text style={styles.sectionTitle}>Datos de la visita</Text>
+              <Text style={styles.sectionHint}>Se actualizarán al guardar</Text>
+            </View>
+
+            {visitItems.length > 0 && (
+              <View style={styles.medCard}>
+                {visitItems.map((item) => (
+                  <View key={item.label} style={styles.reviewRow}>
+                    <Text style={styles.reviewLabel}>{item.label}</Text>
+                    <Text style={styles.reviewValue}>{item.value}</Text>
+                  </View>
+                ))}
+              </View>
+            )}
+
+            {vitalItems.length > 0 && (
+              <View style={styles.medCard}>
+                <Text style={styles.reviewBlockTitle}>Signos vitales</Text>
+                {vitalItems.map((item) => (
+                  <View key={item.label} style={styles.reviewRow}>
+                    <Text style={styles.reviewLabel}>{item.label}</Text>
+                    <Text style={styles.reviewValue}>{item.value}</Text>
+                  </View>
+                ))}
+              </View>
+            )}
           </View>
         )}
 
@@ -320,7 +431,12 @@ export default function ConfirmScanRoute() {
         {/* Confirmar */}
         {(() => {
           const hasEntries = meds.some(m => m.medication_name.trim()) || tests.some(t => t.test_name.trim());
-          const allowEmptyConfirm = Boolean(errorMessage);
+          const allowEmptyConfirm = Boolean(errorMessage) || hasVisitData;
+          const confirmLabel = errorMessage
+            ? 'Guardar manualmente'
+            : !hasEntries && hasVisitData
+              ? 'Actualizar visita'
+              : 'Guardar y actualizar visita';
           return (
         <TouchableOpacity
           style={[styles.confirmBtn, (saving || (!hasEntries && !allowEmptyConfirm)) && { opacity: 0.6 }]}
@@ -333,9 +449,7 @@ export default function ConfirmScanRoute() {
             : (
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
                 <Ionicons name="checkmark-circle" size={20} color={Colors.white} />
-                <Text style={styles.confirmBtnText}>
-                  {errorMessage ? 'Guardar manualmente' : 'Guardar y generar recordatorios'}
-                </Text>
+                <Text style={styles.confirmBtnText}>{confirmLabel}</Text>
               </View>
             )
           }
@@ -373,14 +487,6 @@ function EditField({ label, value, onChangeText, placeholder, keyboardType, mult
 
 function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
 
-function toDateOnly(iso: string): string {
-  if (!iso) return '';
-  const d = new Date(iso);
-  if (isNaN(d.getTime())) return '';
-  const pad = (n: number) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-}
-
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: Colors.background },
   header: {
@@ -416,6 +522,7 @@ const styles = StyleSheet.create({
   section: { gap: Spacing.md },
   sectionHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   sectionTitle: { color: Colors.textPrimary, fontSize: Typography.md, fontWeight: Typography.bold },
+  sectionHint: { color: Colors.textMuted, fontSize: Typography.xs, fontWeight: Typography.medium },
   addRowBtn: { flexDirection: 'row', alignItems: 'center', gap: 4 },
   addRowText: { color: Colors.primary, fontSize: Typography.sm, fontWeight: Typography.semibold },
   emptyText: { color: Colors.textMuted, fontSize: Typography.sm },
@@ -435,6 +542,24 @@ const styles = StyleSheet.create({
     borderWidth: 1, borderColor: Colors.border,
     paddingHorizontal: Spacing.sm, height: 40,
     color: Colors.textPrimary, fontSize: Typography.sm,
+  },
+  reviewBlockTitle: { color: Colors.textSecondary, fontSize: Typography.xs, fontWeight: Typography.semibold, textTransform: 'uppercase' },
+  reviewRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: Spacing.sm,
+  },
+  reviewLabel: {
+    width: 110,
+    color: Colors.textMuted,
+    fontSize: Typography.sm,
+    flexShrink: 0,
+  },
+  reviewValue: {
+    flex: 1,
+    color: Colors.textPrimary,
+    fontSize: Typography.sm,
+    lineHeight: 20,
   },
 
   testCard: { flexDirection: 'row', alignItems: 'flex-start', gap: Spacing.sm, backgroundColor: Colors.surface, borderRadius: Radius.lg, padding: Spacing.md, borderWidth: 1, borderColor: Colors.infoBg },

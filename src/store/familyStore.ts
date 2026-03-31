@@ -1,22 +1,38 @@
 import { create } from 'zustand';
 import { supabase } from '../services/supabase';
-import type { Database } from '../types/database.types';
+import type { Database, TenantPlan } from '../types/database.types';
 import { captureException, markBootStep } from '../services/runtimeDiagnostics';
+import { DEFAULT_TENANT_PLAN } from '../constants/tenantPlans';
 
 type Tenant       = Database['public']['Tables']['tenants']['Row'];
 type Family       = Database['public']['Tables']['families']['Row'];
 type FamilyMember = Database['public']['Tables']['family_members']['Row'];
 type RelType      = Database['public']['Tables']['family_members']['Row']['relationship'];
+type InviteClaimOutcome = {
+  claimed?: boolean;
+  reason?: string;
+  tenant_id?: string;
+  role?: string;
+  invitation_id?: string;
+};
+
+function isMissingClaimInvitesRpc(error: { message?: string | null; details?: string | null } | null): boolean {
+  const haystack = `${error?.message ?? ''} ${error?.details ?? ''}`.toLowerCase();
+  return haystack.includes('claim_pending_tenant_invitations')
+    && (haystack.includes('schema cache') || haystack.includes('could not find the function'));
+}
 
 interface FamilyState {
   tenant:   Tenant | null;
   family:   Family | null;
   members:  FamilyMember[];
+  inviteClaimOutcome: InviteClaimOutcome | null;
   loading:  boolean;
 
   fetchTenantAndFamily: () => Promise<void>;
   fetchMembers:         () => Promise<void>;
-  createTenantWithFamily: (familyName: string) => Promise<string | null>;
+  createTenantWithFamily: (familyName: string, plan?: TenantPlan) => Promise<string | null>;
+  consumeInviteClaimNotice: () => string | null;
   addMember: (data: {
     first_name:   string;
     last_name:    string;
@@ -33,6 +49,7 @@ export const useFamilyStore = create<FamilyState>((set, get) => ({
   tenant:  null,
   family:  null,
   members: [],
+  inviteClaimOutcome: null,
   loading: false,
 
   fetchTenantAndFamily: async () => {
@@ -40,7 +57,22 @@ export const useFamilyStore = create<FamilyState>((set, get) => ({
       set({ loading: true });
       await markBootStep('familyStore.fetchTenantAndFamily:getUser');
       const { data: { user } } = await supabase.auth.getUser();
-      if (!user) { set({ loading: false }); return; }
+      if (!user) {
+        set({ tenant: null, family: null, members: [], inviteClaimOutcome: null, loading: false });
+        return;
+      }
+
+      await markBootStep('familyStore.fetchTenantAndFamily:claimInvites');
+      const { data: claimData, error: claimError } = await supabase.rpc('claim_pending_tenant_invitations');
+      if (claimError && !isMissingClaimInvitesRpc(claimError)) {
+        await captureException('familyStore.fetchTenantAndFamily.claimInvites', claimError);
+      }
+
+      set({
+        inviteClaimOutcome: claimError || isMissingClaimInvitesRpc(claimError)
+          ? null
+          : ((claimData as InviteClaimOutcome | null) ?? null),
+      });
 
       const { data: profile } = await supabase
         .from('profiles')
@@ -48,12 +80,44 @@ export const useFamilyStore = create<FamilyState>((set, get) => ({
         .eq('id', user.id)
         .single();
 
-      if (!profile?.tenant_id) { set({ loading: false }); return; }
+      let tenantId = profile?.tenant_id ?? null;
+
+      if (tenantId) {
+        const { data: preferredMembership } = await supabase
+          .from('tenant_users')
+          .select('tenant_id')
+          .eq('tenant_id', tenantId)
+          .eq('user_id', user.id)
+          .eq('is_active', true)
+          .maybeSingle();
+
+        if (!preferredMembership?.tenant_id) {
+          tenantId = null;
+        }
+      }
+
+      if (!tenantId) {
+        const { data: membership } = await supabase
+          .from('tenant_users')
+          .select('tenant_id')
+          .eq('user_id', user.id)
+          .eq('is_active', true)
+          .order('created_at', { ascending: true })
+          .limit(1)
+          .maybeSingle();
+
+        tenantId = membership?.tenant_id ?? null;
+      }
+
+      if (!tenantId) {
+        set({ tenant: null, family: null, members: [], loading: false });
+        return;
+      }
 
       await markBootStep('familyStore.fetchTenantAndFamily:loadTenant');
       const [{ data: tenant }, { data: families }] = await Promise.all([
-        supabase.from('tenants').select('*').eq('id', profile.tenant_id).single(),
-        supabase.from('families').select('*').eq('tenant_id', profile.tenant_id).eq('is_active', true).limit(1),
+        supabase.from('tenants').select('*').eq('id', tenantId).single(),
+        supabase.from('families').select('*').eq('tenant_id', tenantId).eq('is_active', true).limit(1),
       ]);
 
       set({
@@ -87,34 +151,46 @@ export const useFamilyStore = create<FamilyState>((set, get) => ({
     }
   },
 
-  createTenantWithFamily: async (familyName) => {
+  createTenantWithFamily: async (familyName, plan = DEFAULT_TENANT_PLAN) => {
     set({ loading: true });
     const slug = familyName.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '') + '-' + Date.now();
 
-    // 1. Crear tenant
     const { data: rpcData, error: rpcErr } = await supabase.rpc('create_tenant_with_owner', {
       p_name: familyName,
       p_slug: slug,
+      p_plan: plan,
     });
     if (rpcErr) { set({ loading: false }); return rpcErr.message; }
 
     const tenantId = (rpcData as any)?.tenant_id as string | undefined;
     if (!tenantId) { set({ loading: false }); return 'No se pudo crear el grupo familiar'; }
 
-    // 2. Crear familia dentro del tenant
-    const { data: { user } } = await supabase.auth.getUser();
-    const { data: family, error: famErr } = await supabase
-      .from('families')
-      .insert({ tenant_id: tenantId, name: familyName, created_by: user!.id })
-      .select()
-      .single();
+    await get().fetchTenantAndFamily();
+    if (!get().tenant?.id || !get().family?.id) {
+      set({ loading: false });
+      return 'El grupo se creó, pero no pudimos cargar su estado completo. Reintenta entrar al onboarding.';
+    }
 
-    if (famErr) { set({ loading: false }); return famErr.message; }
-
-    // 3. Refrescar datos
-    const { data: tenant } = await supabase.from('tenants').select('*').eq('id', tenantId).single();
-    set({ tenant: tenant ?? null, family: family ?? null, loading: false });
+    set({ loading: false });
     return null;
+  },
+
+  consumeInviteClaimNotice: () => {
+    const outcome = get().inviteClaimOutcome;
+    set({ inviteClaimOutcome: null });
+
+    if (!outcome || outcome.claimed !== false) {
+      return null;
+    }
+
+    switch (outcome.reason) {
+      case 'already_has_tenant':
+        return 'Esta cuenta ya pertenece a otra familia. Por ahora solo soportamos una familia activa por cuenta, asi que seguiras entrando a tu grupo actual.';
+      case 'missing_email':
+        return 'No pudimos revisar invitaciones pendientes porque esta cuenta no tiene un correo disponible.';
+      default:
+        return null;
+    }
   },
 
   addMember: async (data) => {
@@ -142,5 +218,5 @@ export const useFamilyStore = create<FamilyState>((set, get) => ({
     return null;
   },
 
-  reset: () => set({ tenant: null, family: null, members: [], loading: false }),
+  reset: () => set({ tenant: null, family: null, members: [], inviteClaimOutcome: null, loading: false }),
 }));

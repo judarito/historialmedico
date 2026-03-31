@@ -30,14 +30,27 @@ export interface ExtractedTest {
   instructions?: string;
 }
 
+export interface ExtractedVitals {
+  weight_kg: number | null;
+  height_cm: number | null;
+  temperature_c: number | null;
+  blood_pressure: string | null;
+  heart_rate: number | null;
+}
+
 export interface AIExtractionResult {
-  patient_name: string;
-  doctor_name: string;
-  visit_date: string;
-  diagnosis: string;
+  patient_name: string | null;
+  doctor_name: string | null;
+  specialty: string | null;
+  institution_name: string | null;
+  reason_for_visit: string | null;
+  visit_date: string | null;
+  diagnosis: string | null;
+  notes: string | null;
   medications: ExtractedMedication[];
   tests: ExtractedTest[];
-  general_instructions: string;
+  general_instructions: string | null;
+  vitals: ExtractedVitals;
   confidence: number;
 }
 

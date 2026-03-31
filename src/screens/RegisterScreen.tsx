@@ -90,7 +90,7 @@ export function RegisterScreen({ onRegister, onGoLogin, onGoBack, loading }: Reg
           {/* Título */}
           <View style={styles.titleBlock}>
             <Text style={styles.title}>Crear cuenta</Text>
-            <Text style={styles.subtitle}>Registra a tu familia y comienza a cuidar su salud</Text>
+            <Text style={styles.subtitle}>Si te invitaron a una familia, usa ese mismo correo. Si no, luego podrás crear tu propio grupo familiar.</Text>
           </View>
 
           {/* Formulario */}

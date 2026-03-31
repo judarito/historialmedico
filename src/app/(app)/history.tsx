@@ -17,7 +17,7 @@ import { Colors, Radius, Spacing, Typography } from '../../theme';
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
-type VisitStatus       = 'draft' | 'completed' | 'cancelled';
+type VisitStatus       = 'draft' | 'scheduled' | 'completed' | 'cancelled';
 type PrescriptionStatus = 'active' | 'completed' | 'paused' | 'cancelled';
 type TestStatus        = 'pending' | 'scheduled' | 'completed' | 'result_uploaded' | 'cancelled';
 
@@ -323,6 +323,11 @@ export default function HistoryScreen() {
         <View style={styles.cardRow}>
           <Text style={styles.cardDate}>{formatDate(item.visit_date)}</Text>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+            {item.status === 'scheduled' && (
+              <View style={[styles.badge, { backgroundColor: Colors.infoBg, borderColor: Colors.info }]}>
+                <Text style={[styles.badgeText, { color: Colors.info }]}>Programada</Text>
+              </View>
+            )}
             {item.status === 'cancelled' && (
               <View style={[styles.badge, { backgroundColor: Colors.alertBg, borderColor: Colors.alert }]}>
                 <Text style={[styles.badgeText, { color: Colors.alert }]}>Cancelada</Text>

@@ -9,19 +9,19 @@ import {
   KeyboardAvoidingView,
   Platform,
   ActivityIndicator,
-  Alert,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { Colors, Typography, Spacing, Radius } from '../theme';
 
 interface LoginScreenProps {
   onLogin:        (email: string, password: string) => Promise<void>;
+  onGoForgotPassword: () => void;
   onGoRegister:   () => void;
   onGoBack:       () => void;
   loading?:       boolean;
 }
 
-export function LoginScreen({ onLogin, onGoRegister, onGoBack, loading }: LoginScreenProps) {
+export function LoginScreen({ onLogin, onGoForgotPassword, onGoRegister, onGoBack, loading }: LoginScreenProps) {
   const [email,       setEmail]       = useState('');
   const [password,    setPassword]    = useState('');
   const [showPass,    setShowPass]    = useState(false);
@@ -120,6 +120,9 @@ export function LoginScreen({ onLogin, onGoRegister, onGoBack, loading }: LoginS
                 </TouchableOpacity>
               </View>
               {passError ? <Text style={styles.errorText}>{passError}</Text> : null}
+              <TouchableOpacity onPress={onGoForgotPassword} style={styles.forgotWrap} activeOpacity={0.8}>
+                <Text style={styles.forgotText}>¿Olvidaste tu contraseña?</Text>
+              </TouchableOpacity>
             </View>
 
             {/* Botón */}
@@ -260,5 +263,14 @@ const styles = StyleSheet.create({
     color: Colors.primary,
     fontSize: Typography.sm,
     fontWeight: Typography.semibold,
+  },
+  forgotWrap: {
+    alignSelf: 'flex-end',
+    marginTop: Spacing.xs,
+  },
+  forgotText: {
+    color: Colors.primary,
+    fontSize: Typography.sm,
+    fontWeight: Typography.medium,
   },
 });

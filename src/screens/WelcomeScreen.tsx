@@ -79,6 +79,9 @@ export function WelcomeScreen({ onLogin, onRegister }: WelcomeScreenProps) {
             variant="outline"
             style={styles.btnOutline}
           />
+          <Text style={styles.helperText}>
+            Si te invitaron a una familia, crea tu cuenta con ese mismo correo para entrar automáticamente.
+          </Text>
         </View>
       </View>
     </SafeAreaView>
@@ -191,5 +194,11 @@ const styles = StyleSheet.create({
   },
   btnOutline: {
     width: '100%',
+  },
+  helperText: {
+    color: Colors.textMuted,
+    fontSize: Typography.sm,
+    textAlign: 'center',
+    lineHeight: 18,
   },
 });

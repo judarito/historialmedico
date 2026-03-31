@@ -17,6 +17,7 @@ try {
 }
 
 export class NotificationService {
+  private static lastHandledResponseId: string | null = null;
 
   static async registerForPushNotifications(): Promise<string | null> {
     try {
@@ -45,6 +46,12 @@ export class NotificationService {
         await Notifications.setNotificationChannelAsync('exams', {
           name:       'Exámenes',
           importance: Notifications.AndroidImportance.DEFAULT,
+        });
+        await Notifications.setNotificationChannelAsync('appointments', {
+          name:       'Citas medicas',
+          importance: Notifications.AndroidImportance.HIGH,
+          vibrationPattern: [0, 300, 200, 300],
+          sound:      'default',
         });
       }
 
@@ -87,5 +94,56 @@ export class NotificationService {
         extra: { title },
       });
     }
+  }
+
+  private static getRouteFromData(data: Record<string, unknown> | null | undefined): string {
+    const visitId = typeof data?.medical_visit_id === 'string' ? data.medical_visit_id : null;
+    if (visitId) return `/(app)/visit/${visitId}`;
+
+    const memberId = typeof data?.family_member_id === 'string' ? data.family_member_id : null;
+    if (memberId) return `/(app)/member/${memberId}`;
+
+    return '/(app)/notifications';
+  }
+
+  private static handleResponse(
+    response: Notifications.NotificationResponse | null,
+    onOpen: (route: string) => void
+  ) {
+    if (!response) return;
+
+    const identifier = response.notification.request.identifier;
+    if (identifier && NotificationService.lastHandledResponseId === identifier) {
+      return;
+    }
+
+    NotificationService.lastHandledResponseId = identifier;
+    const data = (response.notification.request.content.data ?? {}) as Record<string, unknown>;
+    onOpen(NotificationService.getRouteFromData(data));
+    void Notifications.clearLastNotificationResponseAsync().catch((error) => {
+      void captureException('NotificationService.clearLastNotificationResponseAsync', error);
+    });
+  }
+
+  static subscribeToNotificationOpens(onOpen: (route: string) => void): () => void {
+    if (Platform.OS === 'web') {
+      return () => {};
+    }
+
+    const subscription = Notifications.addNotificationResponseReceivedListener((response) => {
+      NotificationService.handleResponse(response, onOpen);
+    });
+
+    void Notifications.getLastNotificationResponseAsync()
+      .then((response) => {
+        NotificationService.handleResponse(response, onOpen);
+      })
+      .catch((error) => {
+        void captureException('NotificationService.getLastNotificationResponseAsync', error);
+      });
+
+    return () => {
+      subscription.remove();
+    };
   }
 }

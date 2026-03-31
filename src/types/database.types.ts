@@ -6,7 +6,9 @@
 export type Json = string | number | boolean | null | { [key: string]: Json } | Json[];
 
 // ENUMs reales del schema
+export type TenantPlan             = "free" | "pro" | "family";
 export type TenantUserRole         = "owner" | "admin" | "member" | "viewer";
+export type TenantInvitationStatus = "pending" | "accepted" | "cancelled" | "expired";
 export type RelationshipType       = "self" | "spouse" | "son" | "daughter" | "father" | "mother" | "brother" | "sister" | "grandfather" | "grandmother" | "guardian" | "other";
 export type DocumentProcessingStatus = "pending" | "processing" | "processed" | "verified" | "failed";
 export type DocumentType           = "formula" | "medical_order" | "lab_order" | "lab_result" | "imaging_result" | "incapacity" | "clinical_note" | "vaccination_card" | "voice_note" | "other";
@@ -14,7 +16,7 @@ export type MedicationRoute        = "oral" | "nasal" | "topical" | "ophthalmic"
 export type PrescriptionStatus     = "active" | "completed" | "paused" | "cancelled";
 export type ScheduleStatus         = "pending" | "taken" | "skipped" | "late" | "cancelled";
 export type TestStatus             = "pending" | "scheduled" | "completed" | "result_uploaded" | "cancelled";
-export type VisitStatus            = "draft" | "completed" | "cancelled";
+export type VisitStatus            = "draft" | "scheduled" | "completed" | "cancelled";
 export type ReminderType           = "medication_dose" | "dose_overdue" | "treatment_ending" | "medical_test" | "appointment" | "custom";
 export type ReminderStatus         = "pending" | "sent" | "read" | "dismissed" | "failed";
 
@@ -26,7 +28,7 @@ export interface Database {
           id:          string;
           name:        string;
           slug:        string;
-          plan:        string;
+          plan:        TenantPlan;
           is_active:   boolean;
           settings:    Json;
           created_at:  string;
@@ -67,6 +69,23 @@ export interface Database {
         };
         Insert: Omit<Database["public"]["Tables"]["tenant_users"]["Row"], "id" | "created_at" | "updated_at">;
         Update: Partial<Database["public"]["Tables"]["tenant_users"]["Insert"]>;
+      };
+
+      tenant_invitations: {
+        Row: {
+          id:          string;
+          tenant_id:   string;
+          email:       string;
+          role:        TenantUserRole;
+          status:      TenantInvitationStatus;
+          invited_by:  string | null;
+          accepted_by: string | null;
+          accepted_at: string | null;
+          created_at:  string;
+          updated_at:  string;
+        };
+        Insert: Omit<Database["public"]["Tables"]["tenant_invitations"]["Row"], "id" | "created_at" | "updated_at">;
+        Update: Partial<Database["public"]["Tables"]["tenant_invitations"]["Insert"]>;
       };
 
       families: {
@@ -276,6 +295,19 @@ export interface Database {
         Update: Partial<Database["public"]["Tables"]["reminders"]["Insert"]>;
       };
 
+      notification_reads: {
+        Row: {
+          id:          string;
+          reminder_id: string;
+          user_id:     string;
+          read_at:     string;
+          created_at:  string;
+          updated_at:  string;
+        };
+        Insert: Omit<Database["public"]["Tables"]["notification_reads"]["Row"], "id" | "created_at" | "updated_at">;
+        Update: Partial<Database["public"]["Tables"]["notification_reads"]["Insert"]>;
+      };
+
       audit_logs: {
         Row: {
           id:          string;
@@ -295,7 +327,57 @@ export interface Database {
 
     Functions: {
       create_tenant_with_owner: {
-        Args: { p_name: string; p_slug: string };
+        Args: { p_name: string; p_slug: string; p_plan?: TenantPlan };
+        Returns: Json;
+      };
+      invite_user_to_tenant: {
+        Args: { p_tenant_id: string; p_email: string; p_role?: TenantUserRole };
+        Returns: Json;
+      };
+      claim_pending_tenant_invitations: {
+        Args: Record<PropertyKey, never>;
+        Returns: Json;
+      };
+      check_auth_email_status: {
+        Args: { p_email: string };
+        Returns: Json;
+      };
+      get_tenant_access_members: {
+        Args: { p_tenant_id: string };
+        Returns: Array<{
+          user_id: string;
+          full_name: string | null;
+          email: string | null;
+          role: TenantUserRole;
+          is_active: boolean;
+          joined_at: string | null;
+          is_current_user: boolean;
+        }>;
+      };
+      get_tenant_pending_invitations: {
+        Args: { p_tenant_id: string };
+        Returns: Array<{
+          invitation_id: string;
+          email: string;
+          role: TenantUserRole;
+          status: TenantInvitationStatus;
+          invited_at: string;
+        }>;
+      };
+      update_tenant_user_role: {
+        Args: { p_tenant_id: string; p_user_id: string; p_role: TenantUserRole };
+        Returns: Json;
+      };
+      update_tenant_invitation_role: {
+        Args: { p_invitation_id: string; p_role: TenantUserRole };
+        Returns: Json;
+      };
+      revoke_tenant_user_access: {
+        Args: { p_tenant_id: string; p_user_id: string };
+        Returns: Json;
+      };
+      cancel_tenant_invitation: {
+        Args: { p_invitation_id: string };
         Returns: Json;
       };
       generate_medication_schedule: {
@@ -335,6 +417,37 @@ export interface Database {
           is_as_needed:        boolean;
           pending_doses_today: number;
         }>;
+      };
+      get_notification_feed: {
+        Args: { p_tenant_id: string; p_limit?: number };
+        Returns: Array<{
+          reminder_id: string;
+          reminder_type: ReminderType;
+          title: string;
+          message: string | null;
+          remind_at: string;
+          status: ReminderStatus;
+          family_member_id: string;
+          family_member_name: string | null;
+          medical_visit_id: string | null;
+          medical_test_id: string | null;
+          prescription_id: string | null;
+          medication_schedule_id: string | null;
+          is_read: boolean;
+          read_at: string | null;
+        }>;
+      };
+      get_unread_notification_count: {
+        Args: { p_tenant_id: string };
+        Returns: number;
+      };
+      mark_notification_as_read: {
+        Args: { p_reminder_id: string };
+        Returns: boolean;
+      };
+      mark_all_notifications_as_read: {
+        Args: { p_tenant_id: string };
+        Returns: number;
       };
       get_pending_tests: {
         Args: { p_family_member_id: string };

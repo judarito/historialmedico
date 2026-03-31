@@ -14,7 +14,7 @@ App móvil de historial médico familiar con IA. Permite registrar visitas, medi
 2. **Al terminar cada tarea**, incluir tabla de acciones pendientes con archivo y comando exacto.
 3. **Nunca exponer** `SUPABASE_SERVICE_ROLE_KEY` en el cliente móvil ni en edge functions que usen JWT de usuario. Usar `SUPABASE_ANON_KEY` + `Authorization: Bearer <jwt>`.
 4. **Siempre respetar multi-tenancy**: todas las queries filtran por `tenant_id`. Nunca omitir este campo en inserts.
-5. **Migraciones numeradas**: el próximo número es **020**.
+5. **Migraciones numeradas**: el próximo número es **029**.
 6. **Edge Functions desplegadas desde Dashboard deben ser autocontenidas**: evitar imports locales tipo `../_shared/*` porque el bundler web puede subir solo `source/index.ts` y romper con `Module not found`.
 7. **`.env.example` solo puede contener placeholders**. Nunca dejar API keys reales en archivos versionados, ejemplos, docs o comandos.
 
@@ -25,15 +25,20 @@ App móvil de historial médico familiar con IA. Permite registrar visitas, medi
 ```
 tenants
   └── tenant_users (user_id → tenant_id)
+  └── tenant_invitations (email → tenant_id, pending hasta registro/login)
   └── families
         └── family_members
               ├── medical_visits          (+ voice_note_text; audio original se adjunta como documento)
               │     └── medical_documents (medical_visit_id FK, guarda imagen/audio original + parsed_json)
               ├── prescriptions           (medicamentos confirmados)
-              └── medical_tests           (exámenes)
+              ├── medical_tests           (exámenes)
+              └── reminders               (medicacion, examenes, citas)
+
+notification_reads
+  └── reminder_id + user_id     (estado de lectura por usuario para la campanita)
 ```
 
-**Tablas principales:** `tenants`, `tenant_users`, `families`, `family_members`, `medical_visits`, `medical_documents`, `prescriptions`, `medical_tests`, `profiles`
+**Tablas principales:** `tenants`, `tenant_users`, `tenant_invitations`, `families`, `family_members`, `medical_visits`, `medical_documents`, `prescriptions`, `medical_tests`, `profiles`
 
 **RLS:** todas las tablas usan `tenant_id` + policies que llaman `user_belongs_to_tenant(uuid)`.
 **Función clave:** `search_global(p_query, p_limit)` — RPC de búsqueda full-text (ver migración 013).
@@ -66,13 +71,15 @@ EXPO_PUBLIC_PROJECT_ID=d2e708b8-fceb-4239-8a1d-df5ce8d3d5d2
 
 ```
 src/app/
-├── index.tsx                    # Redirect a login o app según sesión
+├── index.tsx                    # Resuelve sesión activa y redirige a welcome/onboarding/app
 ├── login.tsx                    # Login con email/password
 ├── register.tsx                 # Registro de usuario
+├── forgot-password.tsx          # Solicitud de recuperación por email
+├── reset-password.tsx           # Definir nueva contraseña tras deep link de recovery
 ├── _layout.tsx                  # Root layout — ErrorBoundary + SafeAreaProvider + runtime diagnostics
 │
 ├── onboarding/
-│   ├── index.tsx                # Crear familia (nombre del grupo)
+│   ├── index.tsx                # Crear familia + seleccionar plan inicial del tenant
 │   └── member.tsx               # Agregar primer miembro familiar
 │
 └── (app)/                       # Requiere sesión activa
@@ -83,6 +90,7 @@ src/app/
     ├── edit-member.tsx          # Editar datos de un miembro
     ├── history.tsx              # Historial por miembro: fallback local + RPC + expansión IA
     ├── member/[id].tsx          # Detalle de miembro (visitas, medicamentos)
+    ├── notifications.tsx        # Campanita / inbox de notificaciones con realtime
     ├── visit/[id].tsx           # Detalle de visita (datos, vitales, documentos adjuntos + preview imagen/audio original)
     │
     └── (tabs)/                  # Tab bar principal
@@ -90,7 +98,7 @@ src/app/
         ├── family.tsx           # Lista de miembros familiares
         ├── scan.tsx             # Adjuntar evidencia (foto / galería / voz) — 4 pasos
         ├── medications.tsx      # Medicamentos activos
-        └── profile.tsx          # Perfil y configuración
+        └── profile.tsx          # Perfil, configuración y acceso compartido (usuarios + invitaciones pendientes)
 ```
 
 ---
@@ -137,7 +145,7 @@ src/app/
 | `process-prescription` | `{ document_id }` | OpenAI Vision analiza imagen → extrae meds/exámenes → guarda en `parsed_json` |
 | `search-ai` | `{ query, limit, memberContext? }` | DeepSeek expande términos; en historial puede usar contexto del paciente para afinar la expansión |
 | `voice-to-data` | `{ transcription, context }` | DeepSeek extrae datos estructurados de visita médica (solo si context='visit') |
-| `send-notifications` | — | Cron: envía recordatorios de medicamentos |
+| `send-notifications` | — | Cron: envía recordatorios pendientes de medicamentos, examenes y citas |
 
 **Importante:** `search-ai` usa `SUPABASE_ANON_KEY` + JWT del usuario (no service role key) para que `auth.uid()` funcione dentro del RPC `search_global`.
 **Importante:** la app ya no depende por completo del edge search para devolver resultados; ahora existe una capa de fallback en cliente (`src/services/searchFallback.ts`) para búsqueda global y búsqueda en historial.
@@ -164,8 +172,9 @@ src/app/
 | Store | Archivo | Estado |
 |---|---|---|
 | `useAuthStore` | `store/authStore.ts` | `user`, `session`, `initialized` → `init()`, `signIn()`, `signOut()` |
-| `useFamilyStore` | `store/familyStore.ts` | `tenant`, `family`, `members` → `fetchTenantAndFamily()`, `fetchMembers()` |
+| `useFamilyStore` | `store/familyStore.ts` | `tenant`, `family`, `members` → `fetchTenantAndFamily()`, `fetchMembers()`; al iniciar sesión también reclama invitaciones pendientes |
 | `useMedicationStore` | `store/medicationStore.ts` | `medications` → `fetchMedications()` |
+| `useNotificationStore` | `store/notificationStore.ts` | `items`, `unreadCount` → feed RPC + realtime sobre `reminders` y `notification_reads` |
 
 ---
 
@@ -192,8 +201,17 @@ src/app/
 | `017_search_history_unlinked.sql` | Fix: incluye medicamentos y exámenes sin `medical_visit_id`; devuelve `result_type='medication'/'test'` para registros sin visita vinculada |
 | `018_search_global_tenant_fix.sql` | Fix: `search_global` usa `fm.tenant_id` como fuente de verdad (no `rx.tenant_id`) para cubrir registros con tenant_id incorrecto; también corrige cast `document_type::TEXT` en todos los bloques |
 | `019_soft_delete_visits_and_delete_attachments.sql` | Soft delete de visitas (`deleted_at`, `deleted_by`), RPC `soft_delete_medical_visit`, RPC `delete_medical_document_attachment` y exclusión de visitas borradas en búsquedas |
+| `020_confirm_document_status_enum_casts.sql` | Fix: `confirm_document_and_create_records` usa enums reales para evitar error `status` text vs enum |
+| `021_shared_family_access.sql` | Acceso compartido base: RPC `invite_user_to_tenant` y `get_tenant_access_members` |
+| `022_confirm_document_respect_captured_at.sql` | Fix histórico: la confirmación respeta `captured_at` para no crear dosis activas en fórmulas antiguas |
+| `023_pending_family_invitations.sql` | Invitaciones pendientes por correo (`tenant_invitations`), autoclaim al login y listado de invitaciones pendientes |
+| `024_create_tenant_with_plan.sql` | `create_tenant_with_owner` recibe `plan`, bloquea multi-tenant por cuenta y deja el onboarding listo para suscripción |
+| `025_delete_document_keep_clinical_data.sql` | `delete_medical_document_attachment` permite borrar el adjunto original y conserva medicamentos/exámenes desvinculándolos del documento |
+| `026_onboarding_access_management.sql` | `create_tenant_with_owner` crea/recupera la familia inicial en la misma RPC; añade cambiar rol, cancelar invitación y revocar acceso |
+| `027_auth_signup_email_guard.sql` | RPC `check_auth_email_status` para evitar falso “Cuenta creada” cuando el correo ya existe en Supabase Auth |
+| `028_future_visits_notifications.sql` | Habilita `medical_visits.status='scheduled'`, sincroniza recordatorios de citas, agrega `notification_reads` y RPC del inbox/badge |
 
-**Próxima migración:** `020_...sql`
+**Próxima migración:** `029_...sql`
 
 ---
 
@@ -203,6 +221,8 @@ src/app/
 - **`package.json`**: se agregó `expo-av` para grabar y reproducir el audio original de las notas de voz.
 - **`package.json`**: `react-dom` queda fijado a `19.1.0` para alinear los peers web de `expo-router` con `react@19.1.0`.
 - **`app.json`**: plugin `expo-speech-recognition` con permisos de micrófono para iOS y Android (`RECORD_AUDIO`, `NSSpeechRecognitionUsageDescription`, `NSMicrophoneUsageDescription`).
+- **Notificaciones**: la app registra canales Android `medications`, `exams` y `appointments`; el tap de una push puede abrir la visita relacionada o la campanita.
+- **Visitas futuras**: `add-visit` y la creacion inline desde `scan` guardan `status='scheduled'` cuando la fecha esta en el futuro; `visit/[id]` permite marcar la cita como realizada o cancelada.
 - **`eas.json`**: quedaron definidos perfiles `development`, `preview` y `production`.
 - **`.gitignore`**: ignora `node_modules`, `.expo`, `.env`, `expo-env.d.ts` y archivos locales de tooling para no volver a versionar artefactos pesados ni secretos.
 - **`android/settings.gradle`**: el autolinking de Expo/React Native usa `includeBuild(...)` directo desde `node_modules` en vez de `require.resolve(...)`, porque esa resolución fue frágil durante el build local.
@@ -212,7 +232,9 @@ src/app/
 - **`src/services/runtimeDiagnostics.ts`**: persiste sesiones de arranque y errores en AsyncStorage (`@runtime_diagnostics/*`) para poder reconstruir fallos después de un crash o cierre temprano.
 - **`_layout.tsx`**: `ErrorBoundary` wrapping todo + `ErrorUtils.setGlobalHandler` + captura de `onunhandledrejection`; si algo falla en bootstrap, muestra `RuntimeDiagnosticsScreen`.
 - **`src/services/supabase.ts`**: las vars públicas se leen con referencias directas a `process.env.EXPO_PUBLIC_SUPABASE_URL` y `process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY` para que Expo las inyecte correctamente en el bundle. Si faltan, se registra un diagnóstico de arranque en lugar de romper silenciosamente.
+- **`src/app/_layout.tsx` + `src/services/authLinks.ts`**: los deep links de recuperación (`type=recovery`) ya se parsean manualmente en React Native para hacer `supabase.auth.setSession()` y llevar al usuario a `reset-password`.
 - **`src/services/notifications.ts`**: en web no intenta registrar push ni programar locales con `expo-notifications`; Expo no soporta push web en este setup y antes eso estaba bloqueando el arranque.
+- **`src/screens/WelcomeScreen.tsx`**: `Crear cuenta` volvió a estar habilitado para soportar el flujo de invitaciones; si un cuidador fue invitado debe registrarse con ese mismo correo.
 
 ---
 
@@ -309,6 +331,17 @@ UI de resultados
 - **Búsqueda home:** `src/app/(app)/search.tsx` intenta primero el fallback local, luego `search-ai` y, si la edge function falla, cae a `search_global`.
 - **Búsqueda historial:** `src/app/(app)/history.tsx` intenta primero buscar en memoria sobre los datos ya cargados del miembro y solo después usa `search_medical_history` / `search-ai`.
 - **Navegación de resultados:** la búsqueda global ahora soporta `navigation_id` para que un resultado tipo `document` pueda abrir la visita asociada cuando exista.
+- **Acceso compartido:** `supabase/migrations/023_pending_family_invitations.sql` agrega `tenant_invitations`, autoclaim al login (`claim_pending_tenant_invitations`) y RPC para listar invitaciones pendientes.
+- **Bootstrap de familia:** `src/store/familyStore.ts` reclama invitaciones pendientes al cargar sesión, de modo que un cuidador invitado entra directo a la familia después de registrarse e iniciar sesión con el mismo correo.
+- **UX de invitación:** `src/app/(app)/(tabs)/profile.tsx`, `src/screens/WelcomeScreen.tsx`, `src/screens/RegisterScreen.tsx` y `src/app/register.tsx` ya explican el flujo completo para usuarios existentes o nuevos.
+- **Plan del tenant:** `supabase/migrations/024_create_tenant_with_plan.sql` y `src/app/onboarding/index.tsx` mueven la selección de plan al onboarding de creación de familia, no al registro del usuario.
+- **Rutas de onboarding:** `src/app/login.tsx`, `src/app/onboarding/index.tsx`, `src/app/onboarding/member.tsx` y `src/app/(app)/(tabs)/index.tsx` ahora distinguen mejor entre invitado, owner sin familia y owner sin primer miembro.
+- **Borrado de adjuntos:** `supabase/migrations/025_delete_document_keep_clinical_data.sql` y `src/app/(app)/visit/[id].tsx` permiten eliminar el archivo original sin perder medicamentos ni exámenes ya confirmados.
+- **Root routing:** `src/app/index.tsx` ya no deja ver `WelcomeScreen` si existe una sesión activa; resuelve de inmediato si debe abrir onboarding, agregar primer miembro o entrar a tabs.
+- **Recuperación de contraseña:** `src/screens/LoginScreen.tsx`, `src/app/forgot-password.tsx`, `src/app/reset-password.tsx`, `src/screens/ForgotPasswordScreen.tsx` y `src/screens/UpdatePasswordScreen.tsx` cubren el flujo completo de “olvidé mi contraseña” con deep link móvil.
+- **Onboarding recuperable:** `supabase/migrations/026_onboarding_access_management.sql`, `src/store/familyStore.ts` y `src/app/onboarding/index.tsx` evitan el estado roto de tenant sin familia y permiten completar una familia faltante sin crear otro tenant.
+- **Gestión de acceso completa:** `src/app/(app)/(tabs)/profile.tsx` ya permite invitar con rol, cambiar roles, cancelar invitaciones pendientes y revocar accesos activos; el backend lo valida con las nuevas RPC de la migración 026.
+- **Signup sin correos repetidos:** `supabase/migrations/027_auth_signup_email_guard.sql` y `src/store/authStore.ts` hacen precheck del email en `auth.users` y también detectan la respuesta ofuscada de Supabase para no mostrar “Cuenta creada” si el correo ya existía.
 
 ## Cambios previos (2026-03-29)
 
@@ -332,7 +365,7 @@ UI de resultados
 ## Política de borrado implementada
 
 - **Adjuntos de una visita (`medical_documents`)**: sí se pueden eliminar individualmente desde `visit/[id].tsx`.
-- **Adjuntos con datos derivados**: `delete_medical_document_attachment(p_document_id)` bloquea el borrado si el documento ya está referenciado por `prescriptions` o `medical_tests`.
+- **Adjuntos con datos derivados**: `delete_medical_document_attachment(p_document_id)` ya no bloquea el borrado; desvincula `prescriptions` / `medical_tests` del documento y conserva los datos clínicos.
 - **Visitas médicas**: usan soft delete mediante `soft_delete_medical_visit(p_visit_id)`.
 - **Persistencia del borrado lógico**: la visita conserva la fila, pero queda marcada con `deleted_at` y `deleted_by`.
 - **Listados y búsquedas**: las visitas soft-deleted ya no aparecen en historial, selección de visitas, búsquedas SQL ni fallback local del cliente.

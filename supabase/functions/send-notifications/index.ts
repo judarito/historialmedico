@@ -23,16 +23,13 @@ interface Reminder {
   prescription_id: string | null;
   medication_schedule_id: string | null;
   medical_test_id: string | null;
-  // Join con profiles para obtener push_token
-  family_members: {
-    tenant_id: string;
-    family_id: string;
-  } | null;
+  medical_visit_id: string | null;
 }
 
-interface ProfilePushToken {
-  push_token: string | null;
-  family_member_id: string;
+function getChannelId(reminderType: string): string {
+  if (reminderType === "appointment") return "appointments";
+  if (reminderType === "medical_test") return "exams";
+  return "medications";
 }
 
 async function sendExpoBatch(messages: object[]) {
@@ -81,7 +78,7 @@ serve(async (req) => {
         id, tenant_id, family_member_id,
         reminder_type, title, message,
         remind_at,
-        prescription_id, medication_schedule_id, medical_test_id
+        prescription_id, medication_schedule_id, medical_test_id, medical_visit_id
       `)
       .eq("status", "pending")         // enum reminder_status
       .gte("remind_at", windowStart.toISOString())
@@ -97,7 +94,6 @@ serve(async (req) => {
 
     // Obtener push tokens de los usuarios responsables de cada familiar
     // Buscamos en profiles el push_token de quien tenga acceso al tenant
-    const memberIds = [...new Set(reminders.map(r => r.family_member_id))];
     const tenantIds = [...new Set(reminders.map(r => r.tenant_id))];
 
     // Obtener user_ids de los tenants relevantes
@@ -149,11 +145,14 @@ serve(async (req) => {
           body:     reminder.message || "",
           sound:    "default",
           priority: "high",
+          channelId: getChannelId(reminder.reminder_type),
           data: {
+            reminder_id:            reminder.id,
             type:                   reminder.reminder_type,
             prescription_id:        reminder.prescription_id,
             medication_schedule_id: reminder.medication_schedule_id,
             medical_test_id:        reminder.medical_test_id,
+            medical_visit_id:       reminder.medical_visit_id,
             family_member_id:       reminder.family_member_id,
             tenant_id:              reminder.tenant_id,
           }

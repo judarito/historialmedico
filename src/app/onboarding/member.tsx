@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import {
   View,
@@ -34,7 +34,7 @@ const RELATIONSHIPS: { value: RelType; label: string }[] = [
 ];
 
 export default function OnboardingAddMember() {
-  const { addMember, loading } = useFamilyStore();
+  const { addMember, fetchMembers, fetchTenantAndFamily, loading } = useFamilyStore();
 
   const [firstName,     setFirstName]     = useState('');
   const [lastName,      setLastName]      = useState('');
@@ -44,6 +44,38 @@ export default function OnboardingAddMember() {
   const [epsName,       setEpsName]       = useState('');
   const [showRelPicker, setShowRelPicker] = useState(false);
   const [errors,        setErrors]        = useState<Record<string, string>>({});
+  const [checkingAccess, setCheckingAccess] = useState(true);
+
+  useEffect(() => {
+    let active = true;
+
+    async function ensureMemberOnboarding() {
+      await fetchTenantAndFamily();
+      if (!active) return;
+
+      const state = useFamilyStore.getState();
+      if (!state.tenant?.id || !state.family?.id) {
+        router.replace('/onboarding');
+        return;
+      }
+
+      await state.fetchMembers();
+      if (!active) return;
+
+      const nextState = useFamilyStore.getState();
+      if (nextState.members.length > 0) {
+        router.replace('/(app)/(tabs)');
+        return;
+      }
+
+      setCheckingAccess(false);
+    }
+
+    void ensureMemberOnboarding();
+    return () => {
+      active = false;
+    };
+  }, [fetchMembers, fetchTenantAndFamily]);
 
   function validate() {
     const e: Record<string, string> = {};
@@ -68,6 +100,17 @@ export default function OnboardingAddMember() {
   }
 
   const relLabel = RELATIONSHIPS.find(r => r.value === relationship)?.label ?? relationship;
+
+  if (checkingAccess) {
+    return (
+      <SafeAreaView style={styles.safe}>
+        <View style={styles.loadingState}>
+          <ActivityIndicator color={Colors.primary} size="large" />
+          <Text style={styles.loadingText}>Revisando tu familia...</Text>
+        </View>
+      </SafeAreaView>
+    );
+  }
 
   return (
     <SafeAreaView style={styles.safe}>
@@ -175,6 +218,18 @@ function Field({ label, value, onChangeText, placeholder, error, keyboardType, a
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: Colors.background },
+  loadingState: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: Spacing.base,
+    paddingHorizontal: Spacing.xl,
+  },
+  loadingText: {
+    color: Colors.textSecondary,
+    fontSize: Typography.base,
+    textAlign: 'center',
+  },
   content: { paddingHorizontal: Spacing.xl, paddingTop: Spacing.xxl, gap: Spacing.lg },
   titleBlock: { alignItems: 'center', marginBottom: Spacing.md },
   title: { color: Colors.textPrimary, fontSize: Typography.xl, fontWeight: Typography.bold, textAlign: 'center', marginBottom: 6 },

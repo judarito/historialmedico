@@ -22,30 +22,21 @@ import { Colors, Typography, Spacing, Radius } from '../../../theme';
 import { DatePickerField } from '../../../components/ui/DatePickerField';
 import { VoiceRecordButton, type VoiceCapturePayload } from '../../../components/ui/VoiceRecordButton';
 import type { Database } from '../../../types/database.types';
+import {
+  buildMedicalVisitUpdate,
+  createCurrentDateTimeInput,
+  formatCalendarDate,
+  getDateOnlyKey,
+  getVisitReviewItems,
+  getVitalsReviewItems,
+  normalizeExtractedVisitData,
+  toInputValue,
+  toStoredIso,
+} from '../../../utils';
 
 type FamilyMember = Database['public']['Tables']['family_members']['Row'];
 type MedicalVisit = Database['public']['Tables']['medical_visits']['Row'];
 type Step = 'member' | 'visit' | 'capture' | 'voice_confirm';
-
-function todayISO(): string {
-  const now = new Date();
-  const pad = (n: number) => String(n).padStart(2, '0');
-  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}T${pad(now.getHours())}:${pad(now.getMinutes())}`;
-}
-
-function toDateOnly(iso: string): string {
-  if (!iso) return '';
-  const d = new Date(iso);
-  if (isNaN(d.getTime())) return '';
-  const pad = (n: number) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-}
-
-function formatDate(isoDate?: string | null): string {
-  if (!isoDate) return '';
-  const d = new Date(isoDate);
-  return d.toLocaleDateString('es-CO', { day: '2-digit', month: 'short', year: 'numeric' });
-}
 
 async function invokeProcessPrescription(documentId: string): Promise<{
   manualEntryRequired: boolean;
@@ -110,12 +101,12 @@ export default function ScanTab() {
 
   // Nueva visita inline
   const [showNewVisit,    setShowNewVisit]    = useState(false);
-  const [newVisitDate,    setNewVisitDate]    = useState(todayISO());
+  const [newVisitDate,    setNewVisitDate]    = useState(createCurrentDateTimeInput());
   const [newVisitDoctor,  setNewVisitDoctor]  = useState('');
   const [savingVisit,     setSavingVisit]     = useState(false);
 
   // Fecha del documento (default: fecha de la visita, editable)
-  const [capturedAt, setCapturedAt] = useState(todayISO());
+  const [capturedAt, setCapturedAt] = useState(createCurrentDateTimeInput());
 
   // Foto
   const [image,     setImage]     = useState<{ uri: string } | null>(null);
@@ -132,16 +123,13 @@ export default function ScanTab() {
   // Cuando se selecciona una visita, proponer su fecha como fecha del documento
   useEffect(() => {
     if (selectedVisit?.visit_date) {
-      const vd = new Date(selectedVisit.visit_date);
-      if (!isNaN(vd.getTime())) {
-        const pad = (n: number) => String(n).padStart(2, '0');
-        setCapturedAt(
-          `${vd.getFullYear()}-${pad(vd.getMonth() + 1)}-${pad(vd.getDate())}T${pad(vd.getHours())}:${pad(vd.getMinutes())}`
-        );
+      const visitInputValue = toInputValue(selectedVisit.visit_date, true);
+      if (visitInputValue) {
+        setCapturedAt(visitInputValue);
         return;
       }
     }
-    setCapturedAt(todayISO());
+    setCapturedAt(createCurrentDateTimeInput());
   }, [selectedVisit]);
 
   useEffect(() => {
@@ -181,7 +169,7 @@ export default function ScanTab() {
     setStep('visit');
     const { data } = await supabase
       .from('medical_visits')
-      .select('id, visit_date, doctor_name, specialty, institution_name')
+      .select('id, visit_date, doctor_name, specialty, institution_name, status')
       .eq('family_member_id', id)
       .is('deleted_at', null)
       .order('visit_date', { ascending: false })
@@ -192,6 +180,14 @@ export default function ScanTab() {
 
   async function createVisit() {
     if (!tenant || !family || !user || !selectedMember) return;
+    const storedVisitDate = toStoredIso(newVisitDate, true);
+    if (!storedVisitDate) {
+      Alert.alert('Error', 'La fecha de la visita no es válida.');
+      return;
+    }
+    const visitStatus = new Date(storedVisitDate).getTime() > Date.now()
+      ? 'scheduled'
+      : 'completed';
     setSavingVisit(true);
     const { data, error } = await supabase
       .from('medical_visits')
@@ -199,9 +195,9 @@ export default function ScanTab() {
         tenant_id:        tenant.id,
         family_id:        family.id,
         family_member_id: selectedMember.id,
-        visit_date:       new Date(newVisitDate).toISOString(),
+        visit_date:       storedVisitDate,
         doctor_name:      newVisitDoctor.trim() || null,
-        status:           'completed',
+        status:           visitStatus,
         created_by:       user.id,
       })
       .select()
@@ -231,6 +227,11 @@ export default function ScanTab() {
 
   async function handleUpload() {
     if (!selectedMember || !selectedVisit || !image || !tenant || !family || !user) return;
+    const storedCapturedAt = toStoredIso(capturedAt, true);
+    if (!storedCapturedAt) {
+      Alert.alert('Error', 'La fecha del documento no es válida.');
+      return;
+    }
     setUploading(true);
     try {
       const filePath = `${tenant.id}/${family.id}/${selectedMember.id}/${Date.now()}.jpg`;
@@ -250,11 +251,11 @@ export default function ScanTab() {
           family_member_id:  selectedMember.id,
           medical_visit_id:  selectedVisit.id,
           document_type:     'formula',
-          title:             `Formula ${new Date(capturedAt).toLocaleDateString('es-CO')}`,
+          title:             `Formula ${formatCalendarDate(capturedAt)}`,
           file_path:         filePath,
           mime_type:         'image/jpeg',
           file_size_bytes:   arrayBuffer.byteLength,
-          captured_at:       new Date(capturedAt).toISOString(),
+          captured_at:       storedCapturedAt,
           processing_status: 'pending',
           verified_by_user:  false,
           created_by:        user.id,
@@ -304,8 +305,8 @@ export default function ScanTab() {
       // Detectar si la IA extrajo una fecha distinta a la de la visita
       const aiDate = structured?.visit_date as string | null | undefined;
       if (aiDate) {
-        const aiDateOnly    = toDateOnly(aiDate);
-        const visitDateOnly = toDateOnly(selectedVisit?.visit_date ?? '');
+        const aiDateOnly = getDateOnlyKey(aiDate);
+        const visitDateOnly = getDateOnlyKey(selectedVisit?.visit_date ?? '');
         setVoiceDetectedDate(aiDateOnly && aiDateOnly !== visitDateOnly ? aiDate : null);
       } else {
         setVoiceDetectedDate(null);
@@ -323,7 +324,6 @@ export default function ScanTab() {
     if (!selectedVisit || !selectedMember || !tenant || !family || !user) return;
     setSavingVoice(true);
     try {
-      const recordedAt = new Date().toISOString();
       let audioFilePath = '';
       let audioMimeType: string | null = null;
       let audioSizeBytes: number | null = null;
@@ -349,19 +349,19 @@ export default function ScanTab() {
       }
 
       // Actualizar la visita con la transcripción, datos estructurados y fecha si fue detectada
-      const s = voiceStructured;
-      const visitUpdateDate = voiceDetectedDate
-        ? new Date(voiceDetectedDate).toISOString()
-        : undefined;
+      const normalizedVisitData = normalizeExtractedVisitData(voiceStructured);
+      const recordedAt = normalizedVisitData.visit_date
+        ? toStoredIso(normalizedVisitData.visit_date, /T\d{2}:\d{2}/.test(normalizedVisitData.visit_date)) ?? new Date().toISOString()
+        : new Date().toISOString();
+      const voiceDocumentTitleDate = normalizedVisitData.visit_date
+        ? formatCalendarDate(normalizedVisitData.visit_date)
+        : new Date().toLocaleDateString('es-CO');
+      const visitUpdates = buildMedicalVisitUpdate(normalizedVisitData, {
+        includeVisitDate: Boolean(normalizedVisitData.visit_date),
+      });
       await supabase.from('medical_visits').update({
         voice_note_text:  voiceTranscript,
-        ...(visitUpdateDate              && { visit_date:       visitUpdateDate      }),
-        ...(s?.doctor_name      && { doctor_name:      s.doctor_name      }),
-        ...(s?.specialty        && { specialty:        s.specialty        }),
-        ...(s?.institution_name && { institution_name: s.institution_name }),
-        ...(s?.reason_for_visit && { reason_for_visit: s.reason_for_visit }),
-        ...(s?.diagnosis        && { diagnosis:        s.diagnosis        }),
-        ...(s?.notes            && { notes:            s.notes            }),
+        ...visitUpdates,
       }).eq('id', selectedVisit.id);
 
       // Crear documento de tipo nota de voz
@@ -371,7 +371,7 @@ export default function ScanTab() {
         family_member_id:  selectedMember.id,
         medical_visit_id:  selectedVisit.id,
         document_type:     'voice_note',
-        title:             `Nota de voz ${new Date().toLocaleDateString('es-CO')}`,
+        title:             `Nota de voz ${voiceDocumentTitleDate}`,
         file_path:         audioFilePath,
         mime_type:         audioMimeType,
         file_size_bytes:   audioSizeBytes,
@@ -402,8 +402,8 @@ export default function ScanTab() {
     setImage(null);
     setShowNewVisit(false);
     setNewVisitDoctor('');
-    setNewVisitDate(todayISO());
-    setCapturedAt(todayISO());
+    setNewVisitDate(createCurrentDateTimeInput());
+    setCapturedAt(createCurrentDateTimeInput());
     setVoiceTranscript('');
     setVoiceStructured(null);
     setVoiceAudioUri(null);
@@ -495,8 +495,10 @@ export default function ScanTab() {
                 value={newVisitDate}
                 onChange={setNewVisitDate}
                 withTime
-                maximumDate={new Date()}
               />
+              <Text style={styles.inlineHelperText}>
+                Si la fecha es futura, se creara como cita programada y podremos notificarla.
+              </Text>
               <View style={{ gap: 6 }}>
                 <Text style={styles.formLabel}>Médico (opcional)</Text>
                 <TextInput
@@ -534,9 +536,12 @@ export default function ScanTab() {
                   onPress={() => setSelectedVisit(v)}
                 >
                   <View style={{ flex: 1, gap: 2 }}>
-                    <Text style={styles.visitDate}>{formatDate(v.visit_date)}</Text>
+                    <Text style={styles.visitDate}>{formatCalendarDate(v.visit_date)}</Text>
                     {v.doctor_name && <Text style={styles.visitDoctor}>{v.doctor_name}</Text>}
                     {v.specialty  && <Text style={styles.visitSpecialty}>{v.specialty}</Text>}
+                    {v.status === 'scheduled' && (
+                      <Text style={styles.visitScheduledTag}>Cita programada</Text>
+                    )}
                   </View>
                   {selectedVisit?.id === v.id && (
                     <Ionicons name="checkmark-circle" size={22} color={Colors.primary} />
@@ -575,7 +580,7 @@ export default function ScanTab() {
           <View style={{ flex: 1 }}>
             <Text style={styles.stepHeaderTitle}>Adjuntar evidencia</Text>
             <Text style={styles.stepHeaderSub}>
-              {selectedMember?.first_name} · {formatDate(selectedVisit?.visit_date)}
+              {selectedMember?.first_name} · {formatCalendarDate(selectedVisit?.visit_date)}
             </Text>
           </View>
           <TouchableOpacity onPress={reset} style={styles.backBtn}>
@@ -681,17 +686,10 @@ export default function ScanTab() {
 
   // ── Step: voice_confirm ──────────────────────────────────────────────────────
   if (step === 'voice_confirm') {
-    const s = voiceStructured;
-    const fields = [
-      s?.doctor_name      && { label: 'Médico',           value: s.doctor_name      },
-      s?.specialty        && { label: 'Especialidad',     value: s.specialty        },
-      s?.institution_name && { label: 'Institución',      value: s.institution_name },
-      s?.reason_for_visit && { label: 'Motivo',           value: s.reason_for_visit },
-      s?.diagnosis        && { label: 'Diagnóstico',      value: s.diagnosis        },
-      s?.notes            && { label: 'Observaciones',    value: s.notes            },
-    ].filter(Boolean) as { label: string; value: string }[];
-
-    const meds: any[] = s?.medications?.filter((m: any) => m.medication_name) ?? [];
+    const normalizedVisitData = normalizeExtractedVisitData(voiceStructured);
+    const fields = getVisitReviewItems(normalizedVisitData);
+    const vitalItems = getVitalsReviewItems(normalizedVisitData);
+    const meds: any[] = voiceStructured?.medications?.filter((m: any) => m.medication_name) ?? [];
 
     return (
       <SafeAreaView style={styles.safe}>
@@ -702,7 +700,7 @@ export default function ScanTab() {
           <View style={{ flex: 1 }}>
             <Text style={styles.stepHeaderTitle}>Nota de voz</Text>
             <Text style={styles.stepHeaderSub}>
-              {selectedMember?.first_name} · {formatDate(selectedVisit?.visit_date)}
+              {selectedMember?.first_name} · {formatCalendarDate(selectedVisit?.visit_date)}
             </Text>
           </View>
           <TouchableOpacity onPress={reset} style={styles.backBtn}>
@@ -728,7 +726,7 @@ export default function ScanTab() {
                 <Text style={[styles.transcriptLabel, { color: Colors.info }]}>Fecha detectada en la consulta</Text>
               </View>
               <Text style={styles.transcriptText}>
-                {new Date(voiceDetectedDate).toLocaleDateString('es-CO', { weekday: 'long', day: '2-digit', month: 'long', year: 'numeric' })}
+                {formatCalendarDate(voiceDetectedDate, { weekday: 'long', day: '2-digit', month: 'long', year: 'numeric' })}
               </Text>
               <Text style={[styles.transcriptText, { fontSize: 12, color: Colors.textMuted, marginTop: 4 }]}>
                 La visita se registrará con esta fecha.
@@ -739,11 +737,23 @@ export default function ScanTab() {
           {/* Datos extraídos */}
           {fields.length > 0 && (
             <View style={styles.extractedCard}>
-              <Text style={styles.extractedTitle}>Datos detectados por IA</Text>
+              <Text style={styles.extractedTitle}>Datos de la visita</Text>
               {fields.map(f => (
                 <View key={f.label} style={styles.extractedRow}>
                   <Text style={styles.extractedLabel}>{f.label}</Text>
                   <Text style={styles.extractedValue}>{f.value}</Text>
+                </View>
+              ))}
+            </View>
+          )}
+
+          {vitalItems.length > 0 && (
+            <View style={styles.extractedCard}>
+              <Text style={styles.extractedTitle}>Signos vitales detectados</Text>
+              {vitalItems.map((item) => (
+                <View key={item.label} style={styles.extractedRow}>
+                  <Text style={styles.extractedLabel}>{item.label}</Text>
+                  <Text style={styles.extractedValue}>{item.value}</Text>
                 </View>
               ))}
             </View>
@@ -777,7 +787,7 @@ export default function ScanTab() {
             ) : (
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
                 <Ionicons name="checkmark-circle" size={20} color={Colors.white} />
-                <Text style={styles.processBtnText}>Guardar nota de voz</Text>
+                <Text style={styles.processBtnText}>Guardar y actualizar visita</Text>
               </View>
             )}
           </TouchableOpacity>
@@ -837,6 +847,11 @@ const styles = StyleSheet.create({
     borderWidth: 1, borderColor: Colors.border,
     padding: Spacing.md, gap: Spacing.md,
   },
+  inlineHelperText: {
+    color: Colors.textMuted,
+    fontSize: Typography.xs,
+    lineHeight: 18,
+  },
   formLabel: { color: Colors.textSecondary, fontSize: Typography.sm, fontWeight: Typography.medium },
   formInput: {
     backgroundColor: Colors.background, borderRadius: Radius.md,
@@ -855,6 +870,7 @@ const styles = StyleSheet.create({
   visitDate:       { color: Colors.textPrimary, fontSize: Typography.base, fontWeight: Typography.semibold },
   visitDoctor:     { color: Colors.textSecondary, fontSize: Typography.sm },
   visitSpecialty:  { color: Colors.textMuted,     fontSize: Typography.xs },
+  visitScheduledTag: { color: Colors.info, fontSize: Typography.xs, fontWeight: Typography.semibold },
   emptyBox: { alignItems: 'center', paddingVertical: Spacing.xxl, gap: Spacing.md },
   emptyText: { color: Colors.textMuted, fontSize: Typography.sm, textAlign: 'center' },
 

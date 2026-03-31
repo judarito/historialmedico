@@ -3,10 +3,10 @@ import { Alert } from 'react-native';
 import { LoginScreen } from '../screens/LoginScreen';
 import { useAuthStore } from '../store/authStore';
 import { useFamilyStore } from '../store/familyStore';
+import { resolveAuthenticatedRoute } from '../utils/authRouting';
 
 export default function LoginRoute() {
   const { signIn, loading } = useAuthStore();
-  const { fetchTenantAndFamily } = useFamilyStore();
 
   async function handleLogin(email: string, password: string) {
     const error = await signIn(email, password);
@@ -14,19 +14,24 @@ export default function LoginRoute() {
       Alert.alert('Error al iniciar sesión', error);
       return;
     }
-    // Verificar si tiene tenant configurado
-    await fetchTenantAndFamily();
-    const { tenant } = useFamilyStore.getState();
-    if (!tenant) {
-      router.replace('/onboarding');
-    } else {
-      router.replace('/(app)/(tabs)');
+
+    const destination = await resolveAuthenticatedRoute();
+    const notice = useFamilyStore.getState().consumeInviteClaimNotice();
+
+    if (notice) {
+      Alert.alert('Invitación pendiente', notice, [
+        { text: 'Entendido', onPress: () => router.replace(destination) },
+      ]);
+      return;
     }
+
+    router.replace(destination);
   }
 
   return (
     <LoginScreen
       onLogin={handleLogin}
+      onGoForgotPassword={() => router.push('/forgot-password')}
       onGoRegister={() => router.push('/register')}
       onGoBack={() => router.back()}
       loading={loading}
