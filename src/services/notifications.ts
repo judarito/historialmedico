@@ -101,6 +101,12 @@ export class NotificationService {
     if (visitId) return `/(app)/visit/${visitId}`;
 
     const memberId = typeof data?.family_member_id === 'string' ? data.family_member_id : null;
+    const isMedicationReminder = typeof data?.medication_schedule_id === 'string'
+      || typeof data?.prescription_id === 'string';
+    if (isMedicationReminder && memberId) {
+      return `/(app)/(tabs)/medications?memberId=${memberId}`;
+    }
+
     if (memberId) return `/(app)/member/${memberId}`;
 
     return '/(app)/notifications';

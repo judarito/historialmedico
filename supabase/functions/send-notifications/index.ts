@@ -132,10 +132,18 @@ serve(async (req) => {
 
     // Construir mensajes Expo
     const messages: object[] = [];
-    const reminderIdsToUpdate: string[] = [];
+    const reminderIdsSent: string[] = [];
+    const reminderIdsNoTokens: string[] = [];
 
     for (const reminder of reminders) {
-      const tokens = tokensByTenant.get(reminder.tenant_id) || [];
+      const tokens = [...new Set(tokensByTenant.get(reminder.tenant_id) || [])]
+        .filter((token) => token.startsWith("ExponentPushToken["));
+
+      if (tokens.length === 0) {
+        reminderIdsNoTokens.push(reminder.id);
+        continue;
+      }
+
       for (const token of tokens) {
         if (!token.startsWith("ExponentPushToken[")) continue;
 
@@ -158,14 +166,14 @@ serve(async (req) => {
           }
         });
       }
-      reminderIdsToUpdate.push(reminder.id);
+      reminderIdsSent.push(reminder.id);
     }
 
     // Enviar a Expo
     const receipts = await sendExpoBatch(messages);
 
     // Actualizar status a 'sent' (enum reminder_status real)
-    if (reminderIdsToUpdate.length > 0) {
+    if (reminderIdsSent.length > 0) {
       await supabase
         .from("reminders")
         .update({
@@ -173,13 +181,32 @@ serve(async (req) => {
           sent_at:      now.toISOString(),
           push_receipt: receipts,
         })
-        .in("id", reminderIdsToUpdate);
+        .in("id", reminderIdsSent);
     }
 
-    console.log(`Enviadas ${messages.length} notificaciones para ${reminderIdsToUpdate.length} recordatorios`);
+    if (reminderIdsNoTokens.length > 0) {
+      await supabase
+        .from("reminders")
+        .update({
+          status: "failed",
+          push_receipt: {
+            error: "No hay tokens push validos registrados para este grupo familiar",
+            failed_at: now.toISOString(),
+          },
+        })
+        .in("id", reminderIdsNoTokens);
+    }
+
+    console.log(
+      `Enviadas ${messages.length} notificaciones para ${reminderIdsSent.length} recordatorios; sin tokens: ${reminderIdsNoTokens.length}`
+    );
 
     return new Response(
-      JSON.stringify({ sent: messages.length }),
+      JSON.stringify({
+        sent: messages.length,
+        reminders_sent: reminderIdsSent.length,
+        skipped_no_tokens: reminderIdsNoTokens.length,
+      }),
       { status: 200, headers: { "Content-Type": "application/json" } }
     );
 

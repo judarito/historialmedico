@@ -14,7 +14,7 @@ App móvil de historial médico familiar con IA. Permite registrar visitas, medi
 2. **Al terminar cada tarea**, incluir tabla de acciones pendientes con archivo y comando exacto.
 3. **Nunca exponer** `SUPABASE_SERVICE_ROLE_KEY` en el cliente móvil ni en edge functions que usen JWT de usuario. Usar `SUPABASE_ANON_KEY` + `Authorization: Bearer <jwt>`.
 4. **Siempre respetar multi-tenancy**: todas las queries filtran por `tenant_id`. Nunca omitir este campo en inserts.
-5. **Migraciones numeradas**: el próximo número es **029**.
+5. **Migraciones numeradas**: el próximo número es **037**.
 6. **Edge Functions desplegadas desde Dashboard deben ser autocontenidas**: evitar imports locales tipo `../_shared/*` porque el bundler web puede subir solo `source/index.ts` y romper con `Module not found`.
 7. **`.env.example` solo puede contener placeholders**. Nunca dejar API keys reales en archivos versionados, ejemplos, docs o comandos.
 
@@ -64,6 +64,7 @@ EXPO_PUBLIC_PROJECT_ID=d2e708b8-fceb-4239-8a1d-df5ce8d3d5d2
 - `SUPABASE_DB_URL`
 - `DEEPSEEK_API_KEY`
 - `OPENAI_API_KEY`
+- `GOOGLE_MAPS_API_KEY`
 
 ---
 
@@ -85,7 +86,9 @@ src/app/
 └── (app)/                       # Requiere sesión activa
     ├── _layout.tsx              # Verifica auth, carga tenant
     ├── search.tsx               # Búsqueda global híbrida: fallback local + search-ai + fallback RPC
-    ├── add-visit.tsx            # Formulario nueva visita + botón voz en header
+    ├── doctor-directory.tsx     # Directorio médico externo: Google Places + cache compartido; soporta acceso directo a guardados y crear visitas desde la búsqueda
+    ├── doctor-place/[id].tsx    # Ficha detallada de un lugar médico externo (teléfono/web/horarios on-demand) + CTA para crear visita
+    ├── add-visit.tsx            # Formulario nueva visita + botón voz en header; acepta prefill desde directorio médico y selección de familiar si no viene uno fijo
     ├── confirm-scan.tsx         # Revisión y confirmación de fórmula procesada por IA
     ├── edit-member.tsx          # Editar datos de un miembro
     ├── history.tsx              # Historial por miembro: fallback local + RPC + expansión IA
@@ -94,11 +97,11 @@ src/app/
     ├── visit/[id].tsx           # Detalle de visita (datos, vitales, documentos adjuntos + preview imagen/audio original)
     │
     └── (tabs)/                  # Tab bar principal
-        ├── index.tsx            # Dashboard — saludo + stats + familia + barra búsqueda IA
+        ├── index.tsx            # Dashboard — saludo + stats + familia + barra búsqueda IA + acceso a especialistas guardados
         ├── family.tsx           # Lista de miembros familiares
         ├── scan.tsx             # Adjuntar evidencia (foto / galería / voz) — 4 pasos
         ├── medications.tsx      # Medicamentos activos
-        └── profile.tsx          # Perfil, configuración y acceso compartido (usuarios + invitaciones pendientes)
+        └── profile.tsx          # Perfil, configuración, acceso compartido y acceso directo al directorio médico guardado
 ```
 
 ---
@@ -144,6 +147,8 @@ src/app/
 |---|---|---|
 | `process-prescription` | `{ document_id }` | OpenAI Vision analiza imagen → extrae meds/exámenes → guarda en `parsed_json` |
 | `search-ai` | `{ query, limit, memberContext? }` | DeepSeek expande términos; en historial puede usar contexto del paciente para afinar la expansión |
+| `search-medical-places` | `{ query, citySlug?, specialtySlug?, latitude?, longitude?, ... }` | Busca especialistas/lugares médicos con Google Places + cache global en Supabase |
+| `get-medical-place-details` | `{ placeId, forceRefresh? }` | Carga teléfono/web/horarios/rating solo al abrir la ficha y los cachea por separado |
 | `voice-to-data` | `{ transcription, context }` | DeepSeek extrae datos estructurados de visita médica (solo si context='visit') |
 | `send-notifications` | — | Cron: envía recordatorios pendientes de medicamentos, examenes y citas |
 
@@ -210,8 +215,39 @@ src/app/
 | `026_onboarding_access_management.sql` | `create_tenant_with_owner` crea/recupera la familia inicial en la misma RPC; añade cambiar rol, cancelar invitación y revocar acceso |
 | `027_auth_signup_email_guard.sql` | RPC `check_auth_email_status` para evitar falso “Cuenta creada” cuando el correo ya existe en Supabase Auth |
 | `028_future_visits_notifications.sql` | Habilita `medical_visits.status='scheduled'`, sincroniza recordatorios de citas, agrega `notification_reads` y RPC del inbox/badge |
+| `029_notifications_realtime_hardening.sql` | Agrega `reminders` y `notification_reads` a `supabase_realtime` para que el badge/inbox se actualicen en vivo |
+| `030_cascade_delete_medical_data.sql` | Agrega borrado profundo de adjuntos y visitas para eliminar también medicamentos, dosis, exámenes y recordatorios derivados |
+| `031_medication_dose_notifications.sql` | Sincroniza `medication_schedules` con `reminders` para que las dosis pendientes también lleguen a campanita y push |
+| `032_medical_directory_places_cache.sql` | Directorio médico híbrido: ciudades/especialidades, cache global de búsquedas, lugares de Google Places y lock suave para refresh compartido |
+| `033_medical_directory_place_details_cache.sql` | Extiende `medical_directory_places` con website/teléfonos/horarios y cache separado para detalle on-demand |
+| `034_medical_directory_favorites.sql` | Favoritos persistidos por usuario para el directorio médico externo |
+| `035_medical_directory_places_read_access.sql` | Expone `medical_directory_places` y `medical_directory_place_specialties` en lectura para usuarios autenticados; corrige la pantalla de guardados |
+| `036_clear_family_members_medical_data.sql` | RPC para limpiar toda la información clínica de uno o varios familiares conservando su ficha en `family_members` |
+| `037_clear_family_members_medical_data_sql_editor_fix.sql` | Permite ejecutar la limpieza clínica desde SQL Editor/admin sin chocar con `auth.uid() = NULL`, manteniendo validación por tenant en llamadas autenticadas |
 
-**Próxima migración:** `029_...sql`
+**Próxima migración:** `038_...sql`
+
+---
+
+## Directorio médico externo
+
+**Objetivo actual:** buscar especialistas/lugares médicos de Colombia usando Google Places como fuente inicial, pero sirviendo búsquedas repetidas desde Supabase para bajar costo y latencia.
+
+**Piezas nuevas:**
+- Tablas globales `medical_directory_cities` y `medical_directory_specialties` para normalizar intención.
+- Cache compartido en `medical_directory_search_cache` + `medical_directory_search_cache_results`.
+- Catálogo refrescable de lugares en `medical_directory_places`.
+- Cache de detalle en `medical_directory_places.detail_*` para cargar teléfono/web/horarios solo cuando el usuario abre una ficha.
+- Favoritos por usuario en `medical_directory_favorites`.
+- Métricas básicas en `medical_directory_search_events`.
+- Edge Function `search-medical-places` con auth obligatoria, normalización, cache y lock compartido por `cache_key`.
+- Edge Function `get-medical-place-details` para enriquecer una ficha puntual bajo demanda.
+- La lista ya no usa solo el orden de Google: la Edge Function calcula `local_score`, `place_kind`, `badge_labels` y marca `is_favorite` para priorizar mejor especialista/consultorio/clínica frente a resultados más ruidosos.
+- Inicio (`(tabs)/index.tsx`) muestra un acceso directo con conteo real de guardados; Perfil (`(tabs)/profile.tsx`) tambien deja abrir el directorio ya filtrado en favoritos.
+- Tanto `doctor-directory` como `doctor-place/[id]` ya pueden abrir `add-visit` con medico/especialidad/institucion precargados; si el usuario llega sin `memberId`, `add-visit` deja escoger el familiar antes de guardar.
+- En `doctor-directory`, el toggle `Solo favoritos` ya busca localmente sobre `favoritePlaces` usando texto, ciudad y especialidad; no vuelve a Google mientras ese modo está activo.
+
+**Regla de costos:** la búsqueda inicial pide solo campos tipo lista; teléfono/rating quedan como campos opcionales (`includeRichFields`) para no subir el costo por defecto.
 
 ---
 

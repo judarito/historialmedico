@@ -6,6 +6,7 @@ type PendingDose = Database['public']['Functions']['get_pending_doses_today']['R
 type ActiveMed   = Database['public']['Functions']['get_active_medications']['Returns'][number];
 
 interface MedicationState {
+  currentMemberId: string | null;
   doses:       PendingDose[];
   activeMeds:  ActiveMed[];
   loading:     boolean;
@@ -17,24 +18,35 @@ interface MedicationState {
 }
 
 export const useMedicationStore = create<MedicationState>((set, get) => ({
+  currentMemberId: null,
   doses:      [],
   activeMeds: [],
   loading:    false,
   marking:    null,
 
   fetchTodayDoses: async (memberId) => {
-    set({ loading: true });
+    set({ loading: true, currentMemberId: memberId, doses: [] });
     const { data, error } = await supabase.rpc('get_pending_doses_today', {
       p_family_member_id: memberId,
     });
+
+    if (get().currentMemberId !== memberId) {
+      return;
+    }
+
     set({ doses: error ? [] : (data ?? []), loading: false });
   },
 
   fetchActiveMeds: async (memberId) => {
-    set({ loading: true });
+    set({ loading: true, currentMemberId: memberId, activeMeds: [] });
     const { data, error } = await supabase.rpc('get_active_medications', {
       p_family_member_id: memberId,
     });
+
+    if (get().currentMemberId !== memberId) {
+      return;
+    }
+
     set({ activeMeds: error ? [] : (data ?? []), loading: false });
   },
 

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import {
   View,
@@ -22,19 +22,33 @@ import { createCurrentDateTimeInput, toInputValue, toStoredIso } from '../../uti
 type VisitStatus = 'draft' | 'scheduled' | 'completed' | 'cancelled';
 
 export default function AddVisitScreen() {
-  const { memberId, memberName } = useLocalSearchParams<{
-    memberId: string;
-    memberName: string;
+  const params = useLocalSearchParams<{
+    memberId?: string | string[];
+    memberName?: string | string[];
+    doctorName?: string | string[];
+    specialty?: string | string[];
+    institutionName?: string | string[];
+    sourcePlaceName?: string | string[];
+    sourcePlaceKind?: string | string[];
   }>();
 
-  const { tenant, family } = useFamilyStore();
+  const initialMemberId = typeof params.memberId === 'string' ? params.memberId : '';
+  const initialMemberName = typeof params.memberName === 'string' ? params.memberName : '';
+  const initialDoctorName = typeof params.doctorName === 'string' ? params.doctorName : '';
+  const initialSpecialty = typeof params.specialty === 'string' ? params.specialty : '';
+  const initialInstitutionName = typeof params.institutionName === 'string' ? params.institutionName : '';
+  const sourcePlaceName = typeof params.sourcePlaceName === 'string' ? params.sourcePlaceName : '';
+  const sourcePlaceKind = typeof params.sourcePlaceKind === 'string' ? params.sourcePlaceKind : '';
+
+  const { tenant, family, members, fetchMembers } = useFamilyStore();
   const { user } = useAuthStore();
 
   // ── form state ────────────────────────────────────────────────────────
+  const [selectedMemberId, setSelectedMemberId]   = useState(initialMemberId);
   const [visitDate, setVisitDate]             = useState(createCurrentDateTimeInput());
-  const [doctorName, setDoctorName]           = useState('');
-  const [specialty, setSpecialty]             = useState('');
-  const [institutionName, setInstitutionName] = useState('');
+  const [doctorName, setDoctorName]           = useState(initialDoctorName);
+  const [specialty, setSpecialty]             = useState(initialSpecialty);
+  const [institutionName, setInstitutionName] = useState(initialInstitutionName);
   const [reasonForVisit, setReasonForVisit]   = useState('');
   const [diagnosis, setDiagnosis]             = useState('');
   const [notes, setNotes]                     = useState('');
@@ -49,6 +63,21 @@ export default function AddVisitScreen() {
 
   const [saving,        setSaving]        = useState(false);
   const [voiceLoading,  setVoiceLoading]  = useState(false);
+  const selectedMember = members.find((member) => member.id === selectedMemberId) ?? null;
+  const selectedMemberName = selectedMember?.first_name ?? initialMemberName;
+  const needsMemberSelection = !initialMemberId;
+  const isPrefilledFromDirectory = Boolean(initialDoctorName || initialSpecialty || initialInstitutionName || sourcePlaceName);
+
+  useEffect(() => {
+    if (family?.id && members.length === 0) {
+      void fetchMembers();
+    }
+  }, [family?.id, members.length, fetchMembers]);
+
+  useEffect(() => {
+    if (!needsMemberSelection || selectedMemberId || members.length !== 1) return;
+    setSelectedMemberId(members[0].id);
+  }, [members, needsMemberSelection, selectedMemberId]);
 
   // ── voice ─────────────────────────────────────────────────────────────
   async function handleVoiceTranscription(transcription: string) {
@@ -108,6 +137,11 @@ export default function AddVisitScreen() {
       return;
     }
 
+    if (!selectedMemberId) {
+      Alert.alert('Error', 'Selecciona a qué familiar corresponde esta visita.');
+      return;
+    }
+
     if (!tenant?.id || !family?.id) {
       Alert.alert('Error', 'No se encontró el grupo familiar activo.');
       return;
@@ -134,7 +168,7 @@ export default function AddVisitScreen() {
     const { error } = await supabase.from('medical_visits').insert({
       tenant_id:        tenant.id,
       family_id:        family.id,
-      family_member_id: memberId,
+      family_member_id: selectedMemberId,
       visit_date:       storedVisitDate,
       doctor_name:      doctorName.trim()        || null,
       specialty:        specialty.trim()         || null,
@@ -176,8 +210,8 @@ export default function AddVisitScreen() {
         </TouchableOpacity>
         <View style={styles.headerText}>
           <Text style={styles.headerTitle}>Nueva Visita</Text>
-          {!!memberName && (
-            <Text style={styles.headerSub}>{memberName}</Text>
+          {!!selectedMemberName && (
+            <Text style={styles.headerSub}>{selectedMemberName}</Text>
           )}
         </View>
         {voiceLoading
@@ -208,6 +242,52 @@ export default function AddVisitScreen() {
         <Text style={styles.helperText}>
           Si eliges una fecha futura, se guardara como cita programada y recibiras recordatorios.
         </Text>
+
+        {needsMemberSelection && (
+          <>
+            <Field label="Familiar *">
+              {members.length === 0 ? (
+                <View style={styles.memberState}>
+                  <ActivityIndicator color={Colors.primary} size="small" />
+                  <Text style={styles.memberStateText}>Cargando familiares...</Text>
+                </View>
+              ) : (
+                <View style={styles.memberChipList}>
+                  {members.map((member) => {
+                    const fullName = `${member.first_name} ${member.last_name ?? ''}`.trim();
+                    const active = selectedMemberId === member.id;
+                    return (
+                      <TouchableOpacity
+                        key={member.id}
+                        style={[styles.memberChip, active && styles.memberChipActive]}
+                        onPress={() => setSelectedMemberId(member.id)}
+                        activeOpacity={0.8}
+                      >
+                        <Text style={[styles.memberChipText, active && styles.memberChipTextActive]}>
+                          {fullName}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              )}
+            </Field>
+            <Text style={styles.helperText}>
+              Elige a quién corresponde esta visita antes de guardarla.
+            </Text>
+          </>
+        )}
+
+        {isPrefilledFromDirectory && (
+          <View style={styles.directoryHint}>
+            <Text style={styles.directoryHintTitle}>Datos precargados desde el directorio</Text>
+            <Text style={styles.directoryHintText}>
+              {sourcePlaceName
+                ? `Tomamos datos iniciales de "${sourcePlaceName}"${sourcePlaceKind ? ` (${sourcePlaceKind})` : ''}. Ajústalos si hace falta antes de guardar.`
+                : 'Tomamos datos iniciales del especialista o lugar elegido. Ajústalos si hace falta antes de guardar.'}
+            </Text>
+          </View>
+        )}
 
         <Field label="Médico">
           <TextInput
@@ -437,6 +517,60 @@ const styles = StyleSheet.create({
     fontSize: Typography.xs,
     marginTop: Spacing.xs,
     marginBottom: Spacing.base,
+  },
+  memberState: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.sm,
+    minHeight: 48,
+  },
+  memberStateText: {
+    color: Colors.textSecondary,
+    fontSize: Typography.sm,
+  },
+  memberChipList: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: Spacing.sm,
+  },
+  memberChip: {
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.sm,
+    borderRadius: Radius.full,
+    backgroundColor: Colors.surface,
+    borderWidth: 1,
+    borderColor: Colors.border,
+  },
+  memberChipActive: {
+    backgroundColor: Colors.primary,
+    borderColor: Colors.primary,
+  },
+  memberChipText: {
+    color: Colors.textSecondary,
+    fontSize: Typography.sm,
+    fontWeight: Typography.medium,
+  },
+  memberChipTextActive: {
+    color: Colors.white,
+  },
+  directoryHint: {
+    gap: Spacing.xs,
+    backgroundColor: Colors.infoBg,
+    borderRadius: Radius.lg,
+    borderWidth: 1,
+    borderColor: Colors.info + '22',
+    padding: Spacing.md,
+    marginBottom: Spacing.sm,
+  },
+  directoryHintTitle: {
+    color: Colors.info,
+    fontSize: Typography.sm,
+    fontWeight: Typography.bold,
+  },
+  directoryHintText: {
+    color: Colors.textSecondary,
+    fontSize: Typography.sm,
+    lineHeight: 20,
   },
   input: {
     backgroundColor: Colors.surface,

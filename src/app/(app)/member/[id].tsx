@@ -34,7 +34,7 @@ interface MemberData {
 export default function MemberDetailRoute() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const { members } = useFamilyStore();
-  const { fetchTodayDoses, doses } = useMedicationStore();
+  const { fetchTodayDoses, doses, currentMemberId } = useMedicationStore();
   const [data,    setData]    = useState<MemberData | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -100,7 +100,9 @@ export default function MemberDetailRoute() {
   const { member, upcomingVisits, recentVisits, activeMeds, pendingTests } = data;
   const fullName  = `${member.first_name} ${member.last_name ?? ''}`.trim();
   const age       = calculateAge(member.birth_date);
-  const todayDoses = doses.filter(d => d.status === 'pending' || d.status === 'late');
+  const todayDoses = currentMemberId === member.id
+    ? doses.filter(d => d.status === 'pending' || d.status === 'late')
+    : [];
 
   return (
     <SafeAreaView style={styles.safe}>
@@ -159,7 +161,9 @@ export default function MemberDetailRoute() {
                 </Text>
               </View>
             ))}
-            <TouchableOpacity onPress={() => router.push('/(app)/(tabs)/medications')}>
+            <TouchableOpacity
+              onPress={() => router.push({ pathname: '/(app)/(tabs)/medications', params: { memberId: member.id } })}
+            >
               <Text style={styles.seeAllLink}>Ver todas las dosis →</Text>
             </TouchableOpacity>
           </Section>
@@ -237,7 +241,12 @@ export default function MemberDetailRoute() {
         <View style={styles.quickActions}>
           <QuickAction icon="add-circle-outline" color={Colors.primary} label="Nueva visita" onPress={() => router.push({ pathname: '/(app)/add-visit', params: { memberId: id, memberName: member.first_name } })} />
           <QuickAction icon="time-outline" color={Colors.info} label="Historial" onPress={() => router.push({ pathname: '/(app)/history', params: { memberId: id, memberName: member.first_name } })} />
-          <QuickAction icon="medkit-outline" color={Colors.warning} label="Dosis hoy" onPress={() => router.push('/(app)/(tabs)/medications')} />
+          <QuickAction
+            icon="medkit-outline"
+            color={Colors.warning}
+            label="Dosis hoy"
+            onPress={() => router.push({ pathname: '/(app)/(tabs)/medications', params: { memberId: member.id } })}
+          />
           <QuickAction icon="camera-outline" color={Colors.healthy} label="Escanear" onPress={() => router.push('/(app)/(tabs)/scan')} />
         </View>
 

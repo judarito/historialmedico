@@ -156,6 +156,30 @@ const { data: visit } = await supabase
 - Si `visit_date` queda en el futuro, la app la guarda con `status='scheduled'`.
 - Si la fecha ya paso o es inmediata, se guarda como `status='completed'`.
 - Las citas futuras generan un reminder automatico en `reminders` y lo veras luego en la campanita.
+- Desde el perfil del miembro, la acción `Dosis hoy` y el enlace `Ver todas las dosis` abren la pestaña de medicamentos enfocada en ese mismo familiar, no en el primero de la familia.
+- Las dosis pendientes tambien generan `reminders` de tipo `medication_dose`; cuando llega la hora, salen en la campanita y como push del celular.
+
+## Flujo 4D: Limpiar informacion clinica de un familiar sin borrar su ficha
+
+```sql
+select id, first_name, last_name
+from family_members
+where is_active = true
+order by created_at;
+
+select public.clear_family_members_medical_data(
+  array[
+    'uuid-del-familiar-1',
+    'uuid-del-familiar-2'
+  ]::uuid[]
+);
+```
+
+**Notas actuales:**
+- La limpieza conserva `family_members`; solo borra visitas, adjuntos, medicamentos, horarios, exámenes y recordatorios asociados.
+- La RPC devuelve conteos y `file_paths` para que, si hace falta, luego puedas limpiar archivos en Storage.
+- Esta operación es destructiva y no pasa por soft delete.
+- Si la corres desde SQL Editor, asegúrate de haber aplicado también `037_clear_family_members_medical_data_sql_editor_fix.sql`, porque ahí se habilita el caso `auth.uid() IS NULL`.
 
 ---
 
@@ -179,9 +203,51 @@ Usuario                    App movil                 PostgreSQL / Supabase
 
 **Notas actuales:**
 - El reminder de cita se calcula automaticamente segun cercania de la cita: 24h, 2h, 15m o al momento de la cita.
+- El reminder de medicamento se calcula segun cercania de la dosis: 30m, 10m o a la hora exacta si ya esta muy cerca.
 - `notification_reads` guarda el estado de lectura por usuario para que la campanita no sea compartida entre cuidadores.
 - El inbox usa RPC `get_notification_feed` y `get_unread_notification_count`, y se refresca por Realtime sobre `reminders` y `notification_reads`.
+- `reminders` y `notification_reads` deben estar publicados en `supabase_realtime`; si no, abrir la campanita refresca por RPC pero el badge no sube solo.
 - Desde `visit/[id]` la cita programada se puede marcar como realizada o cancelada.
+- Desde `visit/[id]` ahora tambien existen dos niveles de borrado: `Solo ocultar` para soft delete o `Eliminar todo` para limpiar visita, adjuntos y datos derivados.
+- Al tocar una notificación de medicamento, la app abre la pestaña `Medicamentos` filtrada al familiar correcto.
+
+---
+
+## Flujo 4C: Buscar Especialistas en Colombia (Google Places + Cache)
+
+```
+Usuario                   App movil               Edge Function                PostgreSQL / Supabase          Google Places
+   |                          |                          |                                 |                          |
+   |-- "pediatra Cartagena"-> |-- invoke search -------> |                                 |                          |
+   |                          |                          |-- normaliza ciudad/especialidad |                          |
+   |                          |                          |-- busca cache_key ------------> |                          |
+   |                          |                          |<-- hit fresco ----------------- |                          |
+   |<-- resultados rapidos ---|                          |                                 |                          |
+   |                          |                          |                                 |                          |
+   |                          |                          |-- miss/stale + lock ----------> |                          |
+   |                          |                          |<-- lock adquirido / no -------- |                          |
+   |                          |                          |-- POST places:searchText ------------------------------------> |
+   |                          |                          |<--------------------------------------------------------------- |
+   |                          |                          |-- upsert lugares / cache -----> |                          |
+   |<-- resultados -----------|                          |                                 |                          |
+```
+
+**Notas actuales:**
+- La Edge Function nueva es `search-medical-places`.
+- La key de Google nunca vive en React Native; solo en secrets de Supabase.
+- El cache se comparte entre usuarios por `cache_key`, por ejemplo `country:co|mode:city|city:cartagena|specialty:pediatria|page:1`.
+- Las busquedas frescas se sirven desde `medical_directory_search_cache`; si el cache esta vencido pero usable, la app puede recibir resultado `stale`.
+- El lock suave `claim_medical_directory_cache_refresh()` evita que varias busquedas identicas disparen varias llamadas simultaneas a Google.
+- `medical_directory_cities` y `medical_directory_specialties` quedan expuestas en solo lectura para usuarios autenticados, para usarlas como filtros o sugerencias.
+- El diseño actual esta optimizado para pedir solo campos de lista en Google; telefono/rating quedan como opcion de costo mas alto (`includeRichFields`).
+- Cuando el usuario abre una ficha puntual, la app llama `get-medical-place-details` y usa un cache separado de 7 dias (`detail_*`) para telefono, web y horarios.
+- La pantalla `doctor-place/[id].tsx` es la ficha de detalle y permite llamar, abrir web o abrir Google Maps sin volver a encarecer la lista completa.
+- La lista ahora agrega ranking local (`local_score`) y badges utiles (`Especialista`, `Consultorio`, `Clínica`, `Hospital`, `Favorito`) para mejorar orden y lectura.
+- Los favoritos viven en `medical_directory_favorites`; se pueden marcar desde la lista o la ficha y luego filtrar con `Solo favoritos`.
+- `medical_directory_places` y `medical_directory_place_specialties` deben estar expuestas en lectura a usuarios autenticados; si no, el contador de guardados puede subir pero la lista aparecer vacia.
+- Inicio y Perfil ya pueden abrir `doctor-directory` directamente en modo guardados (`?favorites=1`) para no depender de una busqueda previa.
+- Desde la lista o la ficha del directorio ya se puede tocar `Crear visita`; eso abre `add-visit` con medico/especialidad/institucion precargados, y si no venia un familiar fijo permite escogerlo antes de guardar.
+- Cuando `Solo favoritos` está activo, la busqueda se resuelve localmente sobre los guardados del usuario y no dispara Google Places.
 
 ---
 

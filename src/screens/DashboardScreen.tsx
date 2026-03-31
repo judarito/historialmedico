@@ -33,11 +33,13 @@ interface DashboardScreenProps {
   appointments:  number;
   reminders:     number;
   steps:         number;
+  directoryFavorites: number;
   criticalAlerts:number;
   members:       DashboardMember[];
   onMemberPress:   (id: string) => void;
   onNotifications: () => void;
   onSearch:        () => void;
+  onMedicalDirectory: () => void;
 }
 
 export function DashboardScreen({
@@ -46,11 +48,13 @@ export function DashboardScreen({
   appointments,
   reminders,
   steps,
+  directoryFavorites,
   criticalAlerts,
   members,
   onMemberPress,
   onNotifications,
   onSearch,
+  onMedicalDirectory,
 }: DashboardScreenProps) {
   return (
     <SafeAreaView style={styles.safe}>
@@ -85,6 +89,28 @@ export function DashboardScreen({
           <View style={styles.searchBarBadge}>
             <Ionicons name="sparkles" size={12} color={Colors.primary} />
             <Text style={styles.searchBarBadgeText}>IA</Text>
+          </View>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={styles.directoryCard}
+          onPress={onMedicalDirectory}
+          activeOpacity={0.85}
+        >
+          <View style={styles.directoryIcon}>
+            <Ionicons name="star-outline" size={18} color={Colors.warning} />
+          </View>
+          <View style={styles.directoryBody}>
+            <Text style={styles.directoryTitle}>Tus especialistas guardados</Text>
+            <Text style={styles.directoryText}>
+              {directoryFavorites > 0
+                ? `${directoryFavorites} lugar${directoryFavorites === 1 ? '' : 'es'} listo${directoryFavorites === 1 ? '' : 's'} para consultar sin volver a buscar.`
+                : 'Guarda especialistas desde el directorio para encontrarlos rápido después.'}
+            </Text>
+          </View>
+          <View style={styles.directoryBadge}>
+            <Text style={styles.directoryBadgeValue}>{directoryFavorites}</Text>
+            <Text style={styles.directoryBadgeLabel}>guardados</Text>
           </View>
         </TouchableOpacity>
 
@@ -261,6 +287,61 @@ const styles = StyleSheet.create({
     color: Colors.primary,
     fontSize: Typography.xs,
     fontWeight: Typography.bold,
+  },
+  directoryCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.md,
+    backgroundColor: Colors.surface,
+    borderRadius: Radius.xl,
+    borderWidth: 1,
+    borderColor: Colors.warning + '33',
+    padding: Spacing.md,
+    marginBottom: Spacing.xl,
+  },
+  directoryIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: Colors.warningBg,
+  },
+  directoryBody: {
+    flex: 1,
+    gap: 4,
+  },
+  directoryTitle: {
+    color: Colors.textPrimary,
+    fontSize: Typography.base,
+    fontWeight: Typography.bold,
+  },
+  directoryText: {
+    color: Colors.textSecondary,
+    fontSize: Typography.sm,
+    lineHeight: 20,
+  },
+  directoryBadge: {
+    minWidth: 68,
+    borderRadius: Radius.lg,
+    paddingHorizontal: Spacing.sm,
+    paddingVertical: Spacing.sm,
+    backgroundColor: Colors.warning + '15',
+    borderWidth: 1,
+    borderColor: Colors.warning + '33',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 2,
+  },
+  directoryBadgeValue: {
+    color: Colors.warning,
+    fontSize: Typography.lg,
+    fontWeight: Typography.bold,
+  },
+  directoryBadgeLabel: {
+    color: Colors.textSecondary,
+    fontSize: Typography.xs,
+    fontWeight: Typography.medium,
   },
 
   // Stats

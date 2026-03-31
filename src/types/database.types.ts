@@ -19,6 +19,8 @@ export type TestStatus             = "pending" | "scheduled" | "completed" | "re
 export type VisitStatus            = "draft" | "scheduled" | "completed" | "cancelled";
 export type ReminderType           = "medication_dose" | "dose_overdue" | "treatment_ending" | "medical_test" | "appointment" | "custom";
 export type ReminderStatus         = "pending" | "sent" | "read" | "dismissed" | "failed";
+export type MedicalDirectorySearchMode = "city" | "nearby" | "text";
+export type MedicalDirectoryCacheState = "refreshing" | "ready" | "failed";
 
 export interface Database {
   public: {
@@ -308,6 +310,163 @@ export interface Database {
         Update: Partial<Database["public"]["Tables"]["notification_reads"]["Insert"]>;
       };
 
+      medical_directory_cities: {
+        Row: {
+          id: string;
+          slug: string;
+          name: string;
+          department: string | null;
+          country_code: string;
+          centroid_lat: number;
+          centroid_lng: number;
+          search_aliases: string[];
+          is_active: boolean;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: Omit<Database["public"]["Tables"]["medical_directory_cities"]["Row"], "id" | "created_at" | "updated_at">;
+        Update: Partial<Database["public"]["Tables"]["medical_directory_cities"]["Insert"]>;
+      };
+
+      medical_directory_specialties: {
+        Row: {
+          id: string;
+          slug: string;
+          display_name: string;
+          search_aliases: string[];
+          is_active: boolean;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: Omit<Database["public"]["Tables"]["medical_directory_specialties"]["Row"], "id" | "created_at" | "updated_at">;
+        Update: Partial<Database["public"]["Tables"]["medical_directory_specialties"]["Insert"]>;
+      };
+
+      medical_directory_places: {
+        Row: {
+          id: string;
+          google_place_id: string;
+          display_name: string;
+          formatted_address: string | null;
+          national_phone: string | null;
+          latitude: number | null;
+          longitude: number | null;
+          primary_type: string | null;
+          types: string[];
+          rating: number | null;
+          user_rating_count: number | null;
+          google_maps_uri: string | null;
+          business_status: string | null;
+          city_slug: string | null;
+          international_phone: string | null;
+          website_uri: string | null;
+          current_opening_hours: Json | null;
+          regular_opening_hours: Json | null;
+          source: string;
+          metadata: Json;
+          first_seen_at: string;
+          last_google_sync_at: string | null;
+          expires_at: string | null;
+          detail_last_google_sync_at: string | null;
+          detail_expires_at: string | null;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: Omit<Database["public"]["Tables"]["medical_directory_places"]["Row"], "id" | "first_seen_at" | "created_at" | "updated_at">;
+        Update: Partial<Database["public"]["Tables"]["medical_directory_places"]["Insert"]>;
+      };
+
+      medical_directory_place_specialties: {
+        Row: {
+          id: string;
+          place_id: string;
+          specialty_id: string;
+          source: string;
+          confidence: number;
+          is_primary: boolean;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: Omit<Database["public"]["Tables"]["medical_directory_place_specialties"]["Row"], "id" | "created_at" | "updated_at">;
+        Update: Partial<Database["public"]["Tables"]["medical_directory_place_specialties"]["Insert"]>;
+      };
+
+      medical_directory_search_cache: {
+        Row: {
+          id: string;
+          cache_key: string;
+          query_raw_example: string | null;
+          query_normalized: string;
+          city_slug: string | null;
+          specialty_slug: string | null;
+          search_mode: MedicalDirectorySearchMode;
+          page: number;
+          page_size: number;
+          page_token_seed: string | null;
+          filters: Json;
+          status: MedicalDirectoryCacheState;
+          hit_count: number;
+          result_count: number;
+          google_next_page_token: string | null;
+          google_called_count: number;
+          last_google_sync_at: string | null;
+          expires_at: string | null;
+          refresh_started_at: string | null;
+          refresh_token: string | null;
+          last_error: string | null;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: Omit<Database["public"]["Tables"]["medical_directory_search_cache"]["Row"], "id" | "created_at" | "updated_at">;
+        Update: Partial<Database["public"]["Tables"]["medical_directory_search_cache"]["Insert"]>;
+      };
+
+      medical_directory_search_cache_results: {
+        Row: {
+          id: string;
+          cache_id: string;
+          place_id: string;
+          result_rank: number;
+          source_rank: number | null;
+          created_at: string;
+        };
+        Insert: Omit<Database["public"]["Tables"]["medical_directory_search_cache_results"]["Row"], "id" | "created_at">;
+        Update: Partial<Database["public"]["Tables"]["medical_directory_search_cache_results"]["Insert"]>;
+      };
+
+      medical_directory_search_events: {
+        Row: {
+          id: string;
+          user_id: string | null;
+          cache_key: string | null;
+          query_raw: string;
+          query_normalized: string;
+          city_slug: string | null;
+          specialty_slug: string | null;
+          search_mode: string;
+          page: number;
+          cache_status: string;
+          google_called: boolean;
+          result_count: number;
+          latency_ms: number | null;
+          created_at: string;
+        };
+        Insert: Omit<Database["public"]["Tables"]["medical_directory_search_events"]["Row"], "id" | "created_at">;
+        Update: Partial<Database["public"]["Tables"]["medical_directory_search_events"]["Insert"]>;
+      };
+
+      medical_directory_favorites: {
+        Row: {
+          id: string;
+          user_id: string;
+          place_id: string;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: Omit<Database["public"]["Tables"]["medical_directory_favorites"]["Row"], "id" | "created_at" | "updated_at">;
+        Update: Partial<Database["public"]["Tables"]["medical_directory_favorites"]["Insert"]>;
+      };
+
       audit_logs: {
         Row: {
           id:          string;
@@ -488,6 +647,14 @@ export interface Database {
         Args: { p_document_id: string };
         Returns: Json;
       };
+      delete_medical_document_with_dependencies: {
+        Args: { p_document_id: string };
+        Returns: Json;
+      };
+      delete_medical_visit_cascade: {
+        Args: { p_visit_id: string };
+        Returns: Json;
+      };
       user_belongs_to_tenant: {
         Args: { p_tenant_id: string };
         Returns: boolean;
@@ -495,6 +662,26 @@ export interface Database {
       is_tenant_admin: {
         Args: { p_tenant_id: string };
         Returns: boolean;
+      };
+      claim_medical_directory_cache_refresh: {
+        Args: {
+          p_cache_key: string;
+          p_query_raw_example: string;
+          p_query_normalized: string;
+          p_city_slug?: string | null;
+          p_specialty_slug?: string | null;
+          p_search_mode?: MedicalDirectorySearchMode;
+          p_page?: number;
+          p_page_size?: number;
+          p_page_token_seed?: string | null;
+          p_filters?: Json;
+          p_lock_ttl_seconds?: number;
+        };
+        Returns: Array<{
+          cache_id: string;
+          refresh_token: string;
+          acquired: boolean;
+        }>;
       };
     };
   };

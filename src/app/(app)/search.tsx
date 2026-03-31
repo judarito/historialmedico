@@ -312,6 +312,21 @@ export default function SearchScreen() {
         </View>
       )}
 
+      <TouchableOpacity
+        style={styles.directoryCta}
+        onPress={() => router.push('/(app)/doctor-directory')}
+        activeOpacity={0.8}
+      >
+        <View style={styles.directoryCtaIcon}>
+          <Ionicons name="medkit-outline" size={16} color={Colors.primary} />
+        </View>
+        <View style={styles.directoryCtaBody}>
+          <Text style={styles.directoryCtaTitle}>Buscar especialistas en Colombia</Text>
+          <Text style={styles.directoryCtaText}>Usa Google Places con cache compartido para hallar médicos y clínicas.</Text>
+        </View>
+        <Ionicons name="chevron-forward" size={16} color={Colors.textMuted} />
+      </TouchableOpacity>
+
       {/* Filter chips */}
       {results.length > 0 && (
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chipsRow} style={styles.chipsScroll}>
@@ -420,6 +435,37 @@ const styles = StyleSheet.create({
     paddingHorizontal: Spacing.sm, paddingVertical: 3, marginLeft: Spacing.xs,
   },
   aiTermText: { color: Colors.primary, fontSize: Typography.xs, fontWeight: Typography.medium },
+  directoryCta: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.sm,
+    marginHorizontal: Spacing.base,
+    marginTop: Spacing.sm,
+    backgroundColor: Colors.surface,
+    borderRadius: Radius.lg,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    padding: Spacing.md,
+  },
+  directoryCtaIcon: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: Colors.primary + '15',
+  },
+  directoryCtaBody: { flex: 1, gap: 2 },
+  directoryCtaTitle: {
+    color: Colors.textPrimary,
+    fontSize: Typography.sm,
+    fontWeight: Typography.semibold,
+  },
+  directoryCtaText: {
+    color: Colors.textSecondary,
+    fontSize: Typography.xs,
+    lineHeight: 18,
+  },
 
   // Chips
   chipsScroll: { maxHeight: 52 },

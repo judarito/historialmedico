@@ -31,6 +31,15 @@ type DeleteAttachmentResult = {
   preserved_clinical_data?: boolean | null;
 };
 
+type CascadeDeleteResult = {
+  file_paths?: string[] | null;
+  deleted_documents?: number | null;
+  deleted_prescriptions?: number | null;
+  deleted_schedules?: number | null;
+  deleted_tests?: number | null;
+  deleted_reminders?: number | null;
+};
+
 const STATUS_LABEL: Record<string, { label: string; color: string; icon: any }> = {
   pending:   { label: 'Pendiente',   color: Colors.warning, icon: 'time-outline' },
   processing:{ label: 'Procesando',  color: Colors.info,    icon: 'sync-outline' },
@@ -120,6 +129,8 @@ function isMissingRpc(error: { message?: string | null; details?: string | null 
   const haystack = `${error?.message ?? ''} ${error?.details ?? ''}`.toLowerCase();
   return (
     haystack.includes('delete_medical_document_attachment') ||
+    haystack.includes('delete_medical_document_with_dependencies') ||
+    haystack.includes('delete_medical_visit_cascade') ||
     haystack.includes('soft_delete_medical_visit')
   ) && (
     haystack.includes('does not exist') ||
@@ -293,32 +304,83 @@ export default function VisitDetailRoute() {
     await audioSound.playAsync();
   }
 
-  function confirmDeleteDocument(doc: MedicalDocument) {
-    showConfirm({
-      title: 'Eliminar adjunto',
-      message: 'Se eliminará el archivo original de esta visita. Si ya generó medicamentos o exámenes, esos datos clínicos se conservarán y solo se quitará el adjunto.',
-      confirmLabel: 'Eliminar',
-      onConfirm: () => { void deleteDocument(doc); },
-    });
+  async function removeFilesFromStorage(filePaths: string[]) {
+    if (filePaths.length === 0) return null;
+
+    const uniquePaths = [...new Set(filePaths.filter(Boolean))];
+    if (uniquePaths.length === 0) return null;
+
+    const { error } = await supabase.storage
+      .from('medical-documents')
+      .remove(uniquePaths);
+
+    if (error) {
+      console.warn('storage remove error:', error);
+      return 'No se pudo limpiar uno o más archivos originales en Storage.';
+    }
+
+    return null;
   }
 
-  async function deleteDocument(doc: MedicalDocument) {
+  function confirmDeleteDocument(doc: MedicalDocument) {
+    if (Platform.OS === 'web') {
+      showConfirm({
+        title: 'Eliminar adjunto',
+        message: 'Se eliminará el archivo original y todos los datos derivados de este adjunto.',
+        confirmLabel: 'Eliminar todo',
+        onConfirm: () => { void deleteDocument(doc, 'cascade'); },
+      });
+      return;
+    }
+
+    Alert.alert(
+      'Eliminar adjunto',
+      'Puedes quitar solo el archivo original o borrar también los medicamentos, exámenes y recordatorios creados desde este adjunto.',
+      [
+        { text: 'Cancelar', style: 'cancel' },
+        {
+          text: 'Solo adjunto',
+          style: 'default',
+          onPress: () => { void deleteDocument(doc, 'detach'); },
+        },
+        {
+          text: 'Eliminar todo',
+          style: 'destructive',
+          onPress: () => { void deleteDocument(doc, 'cascade'); },
+        },
+      ]
+    );
+  }
+
+  async function deleteDocument(doc: MedicalDocument, mode: 'detach' | 'cascade') {
     setDeletingDocId(doc.id);
     try {
-      let deletedFilePath = doc.file_path;
+      const filePathsToDelete = new Set<string>();
       let detachedPrescriptionCount = 0;
       let detachedTestCount = 0;
+      let deletedPrescriptionCount = 0;
+      let deletedTestCount = 0;
+      let deletedScheduleCount = 0;
+      let deletedReminderCount = 0;
 
-      const { data, error } = await supabase.rpc('delete_medical_document_attachment', {
-        p_document_id: doc.id,
-      });
+      if (doc.file_path) {
+        filePathsToDelete.add(doc.file_path);
+      }
+
+      const { data, error } = mode === 'cascade'
+        ? await supabase.rpc('delete_medical_document_with_dependencies', {
+          p_document_id: doc.id,
+        })
+        : await supabase.rpc('delete_medical_document_attachment', {
+          p_document_id: doc.id,
+        });
 
       if (error && !isMissingRpc(error)) {
         showAlert('No se pudo eliminar', error.message);
         return;
       }
 
-      if (error && isMissingRpc(error)) {
+      if (mode === 'detach' && error && isMissingRpc(error)) {
         const [
           { data: linkedPrescriptions, error: rxError },
           { data: linkedTestsBySource, error: testsSourceError },
@@ -379,24 +441,30 @@ export default function VisitDetailRoute() {
           showAlert('No se pudo eliminar', deleteError.message);
           return;
         }
-      } else {
+      } else if (mode === 'detach') {
         const result = (data ?? {}) as DeleteAttachmentResult;
-        deletedFilePath = result.file_path ?? doc.file_path;
+        if (result.file_path) {
+          filePathsToDelete.add(result.file_path);
+        }
         detachedPrescriptionCount = result.detached_prescriptions ?? 0;
         detachedTestCount = result.detached_tests ?? 0;
-      }
-
-      let storageWarning = '';
-      if (deletedFilePath) {
-        const { error: storageError } = await supabase.storage
-          .from('medical-documents')
-          .remove([deletedFilePath]);
-
-        if (storageError) {
-          console.warn('storage remove error:', storageError);
-          storageWarning = 'El adjunto se quitó del historial, pero no se pudo limpiar el archivo original en Storage.';
+      } else {
+        if (error && isMissingRpc(error)) {
+          showAlert('Falta actualizar la base de datos', 'Aplica la migración nueva para habilitar el borrado completo de adjuntos.');
+          return;
         }
+
+        const result = (data ?? {}) as CascadeDeleteResult;
+        for (const path of result.file_paths ?? []) {
+          if (path) filePathsToDelete.add(path);
+        }
+        deletedPrescriptionCount = result.deleted_prescriptions ?? 0;
+        deletedTestCount = result.deleted_tests ?? 0;
+        deletedScheduleCount = result.deleted_schedules ?? 0;
+        deletedReminderCount = result.deleted_reminders ?? 0;
       }
+
+      const storageWarning = await removeFilesFromStorage([...filePathsToDelete]) ?? '';
 
       if (previewDoc?.id === doc.id) {
         await closePreview();
@@ -405,7 +473,7 @@ export default function VisitDetailRoute() {
       setDocs((current) => current.filter((item) => item.id !== doc.id));
 
       const successNotes: string[] = [];
-      if (detachedPrescriptionCount > 0 || detachedTestCount > 0) {
+      if (mode === 'detach' && (detachedPrescriptionCount > 0 || detachedTestCount > 0)) {
         const preservedParts: string[] = [];
         if (detachedPrescriptionCount > 0) {
           preservedParts.push(
@@ -419,12 +487,28 @@ export default function VisitDetailRoute() {
         }
         successNotes.push(`Se conservó la información clínica: ${preservedParts.join(' y ')}.`);
       }
+      if (mode === 'cascade') {
+        const deletedParts: string[] = [];
+        if (deletedPrescriptionCount > 0) {
+          deletedParts.push(`${deletedPrescriptionCount} medicamento${deletedPrescriptionCount === 1 ? '' : 's'}`);
+        }
+        if (deletedScheduleCount > 0) {
+          deletedParts.push(`${deletedScheduleCount} dosis programada${deletedScheduleCount === 1 ? '' : 's'}`);
+        }
+        if (deletedTestCount > 0) {
+          deletedParts.push(`${deletedTestCount} examen${deletedTestCount === 1 ? '' : 'es'}`);
+        }
+        if (deletedReminderCount > 0) {
+          deletedParts.push(`${deletedReminderCount} recordatorio${deletedReminderCount === 1 ? '' : 's'}`);
+        }
+        if (deletedParts.length > 0) {
+          successNotes.push(`Se eliminaron también los datos derivados: ${deletedParts.join(', ')}.`);
+        }
+      }
       if (storageWarning) {
         successNotes.push(storageWarning);
       }
-      if (successNotes.length > 0) {
-        showAlert('Adjunto eliminado', successNotes.join(' '));
-      }
+      showAlert('Adjunto eliminado', successNotes.join(' ') || 'El adjunto se eliminó correctamente.');
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Ocurrió un error inesperado.';
       showAlert('No se pudo eliminar', message);
@@ -436,12 +520,33 @@ export default function VisitDetailRoute() {
   function confirmDeleteVisit() {
     if (!visit) return;
 
-    showConfirm({
-      title: 'Eliminar visita',
-      message: 'La visita se ocultará del historial normal. Sus datos quedarán preservados como borrado lógico.',
-      confirmLabel: 'Eliminar',
-      onConfirm: () => { void softDeleteVisit(); },
-    });
+    if (Platform.OS === 'web') {
+      showConfirm({
+        title: 'Eliminar visita',
+        message: 'Se eliminará la visita junto con sus adjuntos y datos derivados.',
+        confirmLabel: 'Eliminar todo',
+        onConfirm: () => { void deleteVisitCascade(); },
+      });
+      return;
+    }
+
+    Alert.alert(
+      'Eliminar visita',
+      'Puedes ocultar la visita del historial o eliminar por completo la visita, sus adjuntos, medicamentos, exámenes y recordatorios asociados.',
+      [
+        { text: 'Cancelar', style: 'cancel' },
+        {
+          text: 'Solo ocultar',
+          style: 'default',
+          onPress: () => { void softDeleteVisit(); },
+        },
+        {
+          text: 'Eliminar todo',
+          style: 'destructive',
+          onPress: () => { void deleteVisitCascade(); },
+        },
+      ]
+    );
   }
 
   async function softDeleteVisit() {
@@ -479,6 +584,74 @@ export default function VisitDetailRoute() {
       }
 
       await closePreview();
+      router.back();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Ocurrió un error inesperado.';
+      showAlert('No se pudo eliminar', message);
+    } finally {
+      setDeletingVisit(false);
+    }
+  }
+
+  async function deleteVisitCascade() {
+    if (!visit) return;
+
+    setDeletingVisit(true);
+    try {
+      const { data, error } = await supabase.rpc('delete_medical_visit_cascade', {
+        p_visit_id: visit.id,
+      });
+
+      if (error) {
+        if (isMissingRpc(error)) {
+          showAlert('Falta actualizar la base de datos', 'Aplica la migración nueva para habilitar el borrado completo de visitas.');
+          return;
+        }
+
+        showAlert('No se pudo eliminar', error.message);
+        return;
+      }
+
+      const result = (data ?? {}) as CascadeDeleteResult;
+      const storageWarning = await removeFilesFromStorage(result.file_paths ?? []) ?? '';
+
+      await closePreview();
+
+      const deletedParts: string[] = [];
+      if ((result.deleted_documents ?? 0) > 0) {
+        deletedParts.push(`${result.deleted_documents} adjunto${result.deleted_documents === 1 ? '' : 's'}`);
+      }
+      if ((result.deleted_prescriptions ?? 0) > 0) {
+        deletedParts.push(`${result.deleted_prescriptions} medicamento${result.deleted_prescriptions === 1 ? '' : 's'}`);
+      }
+      if ((result.deleted_schedules ?? 0) > 0) {
+        deletedParts.push(`${result.deleted_schedules} dosis programada${result.deleted_schedules === 1 ? '' : 's'}`);
+      }
+      if ((result.deleted_tests ?? 0) > 0) {
+        deletedParts.push(`${result.deleted_tests} examen${result.deleted_tests === 1 ? '' : 'es'}`);
+      }
+      if ((result.deleted_reminders ?? 0) > 0) {
+        deletedParts.push(`${result.deleted_reminders} recordatorio${result.deleted_reminders === 1 ? '' : 's'}`);
+      }
+
+      if (deletedParts.length > 0 || storageWarning) {
+        const summaryMessage = [
+          deletedParts.length > 0 ? `También se eliminaron: ${deletedParts.join(', ')}.` : '',
+          storageWarning,
+        ].filter(Boolean).join(' ');
+
+        if (Platform.OS === 'web') {
+          showAlert('Visita eliminada', summaryMessage);
+          router.back();
+          return;
+        }
+
+        Alert.alert('Visita eliminada', summaryMessage, [
+          { text: 'OK', onPress: () => router.back() },
+        ]);
+        return;
+      }
+
       router.back();
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Ocurrió un error inesperado.';

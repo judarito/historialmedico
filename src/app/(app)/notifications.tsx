@@ -40,6 +40,13 @@ function formatDateTime(value: string) {
 }
 
 function buildNotificationRoute(item: NotificationItem) {
+  if ((item.medication_schedule_id || item.prescription_id) && item.family_member_id) {
+    return {
+      pathname: '/(app)/(tabs)/medications' as const,
+      params: { memberId: item.family_member_id },
+    };
+  }
+
   if (item.medical_visit_id) {
     return {
       pathname: '/(app)/visit/[id]' as const,

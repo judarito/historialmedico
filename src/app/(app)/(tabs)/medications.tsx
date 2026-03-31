@@ -10,6 +10,7 @@ import {
   Alert,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { useLocalSearchParams } from 'expo-router';
 import { useFamilyStore } from '../../../store/familyStore';
 import { useMedicationStore } from '../../../store/medicationStore';
 import { Colors, Typography, Spacing, Radius } from '../../../theme';
@@ -22,19 +23,25 @@ function getMemberDisplayName(member: Database['public']['Tables']['family_membe
 }
 
 export default function MedicationsTab() {
+  const { memberId } = useLocalSearchParams<{ memberId?: string }>();
   const { members, fetchMembers } = useFamilyStore();
   const { doses, loading, marking, fetchTodayDoses, markDose } = useMedicationStore();
   const [selectedMember, setSelectedMember] = useState<string | null>(null);
 
   useEffect(() => {
-    fetchMembers().then(() => {
+    void fetchMembers().then(() => {
       const { members: ms } = useFamilyStore.getState();
-      if (ms.length > 0) {
-        setSelectedMember(ms[0].id);
-        fetchTodayDoses(ms[0].id);
-      }
+      if (ms.length === 0) return;
+
+      const requestedMember = memberId
+        ? ms.find((member) => member.id === memberId)
+        : null;
+      const initialMember = requestedMember ?? ms[0];
+
+      setSelectedMember(initialMember.id);
+      void fetchTodayDoses(initialMember.id);
     });
-  }, []);
+  }, [fetchMembers, fetchTodayDoses, memberId]);
 
   function selectMember(id: string) {
     setSelectedMember(id);

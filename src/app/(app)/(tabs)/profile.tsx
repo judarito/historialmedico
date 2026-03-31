@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
   View,
   Text,
@@ -9,7 +9,7 @@ import {
   TextInput,
   ActivityIndicator,
 } from 'react-native';
-import { router } from 'expo-router';
+import { router, useFocusEffect } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuthStore } from '../../../store/authStore';
@@ -135,6 +135,8 @@ export default function ProfileTab() {
   const [inviteRole, setInviteRole] = useState<TenantUserRole>('member');
   const [inviting, setInviting] = useState(false);
   const [mutatingAccessKey, setMutatingAccessKey] = useState<string | null>(null);
+  const [directoryFavoritesCount, setDirectoryFavoritesCount] = useState(0);
+  const [loadingDirectorySummary, setLoadingDirectorySummary] = useState(false);
 
   const fullName = user?.user_metadata?.full_name ?? user?.email?.split('@')[0] ?? 'Usuario';
   const email = user?.email ?? '';
@@ -142,6 +144,29 @@ export default function ProfileTab() {
   const currentRole = currentAccess?.role ?? null;
   const canManageAccess = currentRole === 'owner' || currentRole === 'admin';
   const assignableRoles = getAssignableRoles(currentRole);
+
+  const loadDirectorySummary = useCallback(async () => {
+    if (!user?.id) {
+      setDirectoryFavoritesCount(0);
+      setLoadingDirectorySummary(false);
+      return;
+    }
+
+    setLoadingDirectorySummary(true);
+    const { count, error } = await supabase
+      .from('medical_directory_favorites')
+      .select('id', { count: 'exact', head: true })
+      .eq('user_id', user.id);
+
+    setLoadingDirectorySummary(false);
+
+    if (error) {
+      setDirectoryFavoritesCount(0);
+      return;
+    }
+
+    setDirectoryFavoritesCount(count ?? 0);
+  }, [user?.id]);
 
   async function loadAccessData() {
     if (!tenant?.id) {
@@ -185,6 +210,14 @@ export default function ProfileTab() {
   useEffect(() => {
     void loadAccessData();
   }, [tenant?.id]);
+
+  useEffect(() => {
+    void loadDirectorySummary();
+  }, [loadDirectorySummary]);
+
+  useFocusEffect(useCallback(() => {
+    void loadDirectorySummary();
+  }, [loadDirectorySummary]));
 
   useEffect(() => {
     if (assignableRoles.length === 0) return;
@@ -649,6 +682,24 @@ export default function ProfileTab() {
             ) : null}
           </Section>
         )}
+
+        <Section title="Directorio médico">
+          <InfoRow
+            icon="star-outline"
+            label="Guardados"
+            value={loadingDirectorySummary ? 'Cargando...' : `${directoryFavoritesCount} especialista${directoryFavoritesCount === 1 ? '' : 's'}`}
+          />
+          <OptionRow
+            icon="medkit-outline"
+            label="Ver especialistas guardados"
+            onPress={() => router.push({ pathname: '/(app)/doctor-directory', params: { favorites: '1' } })}
+          />
+          <OptionRow
+            icon="search-outline"
+            label="Buscar especialistas"
+            onPress={() => router.push('/(app)/doctor-directory')}
+          />
+        </Section>
 
         <Section title="Configuración">
           <OptionRow
