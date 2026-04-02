@@ -38,11 +38,14 @@ interface PendingTest {
 
 interface SharedSummary {
   member: {
-    full_name: string;
+    first_name: string;
+    last_name: string | null;
     birth_date: string | null;
     blood_type: string | null;
     allergies: string | null;
     chronic_conditions: string | null;
+    emergency_contact_name: string | null;
+    emergency_contact_phone: string | null;
   };
   active_medications: ActiveMedication[];
   recent_visits: RecentVisit[];
@@ -109,6 +112,7 @@ export default function SharedHealthSummaryScreen() {
   }
 
   const { member, active_medications, recent_visits, pending_tests } = summary;
+  const fullName = `${member.first_name}${member.last_name ? ' ' + member.last_name : ''}`;
   const age = calculateAge(member.birth_date);
 
   return (
@@ -128,11 +132,11 @@ export default function SharedHealthSummaryScreen() {
         <View style={styles.memberHeader}>
           <View style={styles.memberAvatar}>
             <Text style={styles.memberInitial}>
-              {member.full_name.charAt(0).toUpperCase()}
+              {member.first_name.charAt(0).toUpperCase()}
             </Text>
           </View>
           <View style={styles.memberInfo}>
-            <Text style={styles.memberName}>{member.full_name}</Text>
+            <Text style={styles.memberName}>{fullName}</Text>
             {age !== null && (
               <Text style={styles.memberAge}>{age} años</Text>
             )}
