@@ -482,6 +482,22 @@ export interface Database {
         Insert: never;
         Update: never;
       };
+
+      health_share_tokens: {
+        Row: {
+          id:         string;
+          token:      string;
+          member_id:  string;
+          tenant_id:  string;
+          expires_at: string;
+          created_by: string;
+          is_active:  boolean;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: Omit<Database["public"]["Tables"]["health_share_tokens"]["Row"], "id" | "created_at" | "updated_at">;
+        Update: Partial<Database["public"]["Tables"]["health_share_tokens"]["Insert"]>;
+      };
     };
 
     Functions: {
@@ -682,6 +698,19 @@ export interface Database {
           refresh_token: string;
           acquired: boolean;
         }>;
+      };
+      generate_share_token: {
+        Args: {
+          p_member_id: string;
+          p_ttl_hours?: number;
+        };
+        Returns: Json;
+      };
+      get_shared_health_summary: {
+        Args: {
+          p_token: string;
+        };
+        Returns: Json;
       };
     };
   };

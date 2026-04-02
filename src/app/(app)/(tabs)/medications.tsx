@@ -13,6 +13,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { useFamilyStore } from '../../../store/familyStore';
 import { useMedicationStore } from '../../../store/medicationStore';
+import { supabase } from '../../../services/supabase';
 import { Colors, Typography, Spacing, Radius } from '../../../theme';
 import type { Database } from '../../../types/database.types';
 
@@ -29,6 +30,7 @@ export default function MedicationsTab() {
   const [selectedMember, setSelectedMember] = useState<string | null>(null);
   const [preferredMemberId, setPreferredMemberId] = useState<string | null>(memberId ?? null);
   const selectedMemberRef = useRef<string | null>(null);
+  const [expiringMeds, setExpiringMeds] = useState<{ medication_name: string; end_at: string }[]>([]);
 
   useEffect(() => {
     selectedMemberRef.current = selectedMember;
@@ -79,6 +81,17 @@ export default function MedicationsTab() {
   useEffect(() => {
     if (!selectedMember) return;
     void fetchTodayDoses(selectedMember);
+    // Cargar medicamentos por vencer (≤7 días)
+    const sevenDays = new Date(Date.now() + 7 * 86400000).toISOString();
+    void supabase
+      .from('prescriptions')
+      .select('medication_name, end_at')
+      .eq('family_member_id', selectedMember)
+      .eq('status', 'active')
+      .not('end_at', 'is', null)
+      .lte('end_at', sevenDays)
+      .order('end_at', { ascending: true })
+      .then(({ data }) => setExpiringMeds(data ?? []));
   }, [selectedMember, fetchTodayDoses]);
 
   useFocusEffect(useCallback(() => {
@@ -167,6 +180,24 @@ export default function MedicationsTab() {
                     </Text>
                   </View>
                 </TouchableOpacity>
+              );
+            })}
+          </View>
+        </View>
+      )}
+
+      {expiringMeds.length > 0 && (
+        <View style={styles.expiringBanner}>
+          <Ionicons name="warning-outline" size={16} color={Colors.warning} />
+          <View style={{ flex: 1 }}>
+            <Text style={styles.expiringTitle}>Tratamientos por vencer</Text>
+            {expiringMeds.map((m, i) => {
+              const days = Math.ceil((new Date(m.end_at).getTime() - Date.now()) / 86400000);
+              const label = days < 0 ? 'Vencido' : days === 0 ? 'Vence hoy' : `${days} día${days !== 1 ? 's' : ''}`;
+              return (
+                <Text key={i} style={styles.expiringItem}>
+                  {m.medication_name} · <Text style={{ color: days <= 0 ? Colors.alert : Colors.warning }}>{label}</Text>
+                </Text>
               );
             })}
           </View>
@@ -272,6 +303,14 @@ function DoseCard({ dose, marking, done, onTaken, onSkipped }: {
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: Colors.background },
   header: { paddingHorizontal: Spacing.base, paddingTop: Spacing.base, paddingBottom: Spacing.sm },
+  expiringBanner: {
+    flexDirection: 'row', alignItems: 'flex-start', gap: Spacing.sm,
+    marginHorizontal: Spacing.base, marginBottom: Spacing.sm,
+    backgroundColor: '#2A1E0A', borderRadius: Radius.lg,
+    padding: Spacing.md, borderWidth: 1, borderColor: '#F5A62344',
+  },
+  expiringTitle: { color: '#F5A623', fontSize: Typography.sm, fontWeight: Typography.bold, marginBottom: 2 },
+  expiringItem: { color: '#8BA0B8', fontSize: Typography.xs, marginTop: 2 },
   title: { color: Colors.textPrimary, fontSize: Typography.xl, fontWeight: Typography.bold },
   subtitle: { color: Colors.textSecondary, fontSize: Typography.sm },
   selectorSection: { gap: Spacing.sm, paddingBottom: Spacing.sm },

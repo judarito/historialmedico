@@ -14,7 +14,7 @@ App móvil de historial médico familiar con IA. Permite registrar visitas, medi
 2. **Al terminar cada tarea**, incluir tabla de acciones pendientes con archivo y comando exacto.
 3. **Nunca exponer** `SUPABASE_SERVICE_ROLE_KEY` en el cliente móvil ni en edge functions que usen JWT de usuario. Usar `SUPABASE_ANON_KEY` + `Authorization: Bearer <jwt>`.
 4. **Siempre respetar multi-tenancy**: todas las queries filtran por `tenant_id`. Nunca omitir este campo en inserts.
-5. **Migraciones numeradas**: el próximo número es **037**.
+5. **Migraciones numeradas**: el próximo número es **039**.
 6. **Edge Functions desplegadas desde Dashboard deben ser autocontenidas**: evitar imports locales tipo `../_shared/*` porque el bundler web puede subir solo `source/index.ts` y romper con `Module not found`.
 7. **`.env.example` solo puede contener placeholders**. Nunca dejar API keys reales en archivos versionados, ejemplos, docs o comandos.
 
@@ -226,7 +226,9 @@ src/app/
 | `036_clear_family_members_medical_data.sql` | RPC para limpiar toda la información clínica de uno o varios familiares conservando su ficha en `family_members` |
 | `037_clear_family_members_medical_data_sql_editor_fix.sql` | Permite ejecutar la limpieza clínica desde SQL Editor/admin sin chocar con `auth.uid() = NULL`, manteniendo validación por tenant en llamadas autenticadas |
 
-**Próxima migración:** `038_...sql`
+| `038_health_share_tokens.sql` | Tabla `health_share_tokens` para compartir historial; RPC `generate_share_token` (TTL configurable, revoca tokens previos); RPC `get_shared_health_summary` accesible por `anon` sin JWT |
+
+**Próxima migración:** `039_...sql`
 
 ---
 

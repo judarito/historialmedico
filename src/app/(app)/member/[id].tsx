@@ -14,6 +14,9 @@ import { supabase } from '../../../services/supabase';
 import { useFamilyStore } from '../../../store/familyStore';
 import { useMedicationStore } from '../../../store/medicationStore';
 import { Avatar } from '../../../components/ui/Avatar';
+import { SupplyBadge } from '../../../components/ui/SupplyBadge';
+import { AdherenceCard } from '../../../components/ui/AdherenceCard';
+import { VitalsChartsSection } from '../../../components/ui/VitalsChartsSection';
 import { Colors, Typography, Spacing, Radius, Shadow } from '../../../theme';
 import type { Database } from '../../../types/database.types';
 import { calculateAge, formatCalendarDate } from '../../../utils';
@@ -157,6 +160,9 @@ export default function MemberDetailRoute() {
           </View>
         )}
 
+        {/* Adherencia al tratamiento */}
+        <AdherenceCard memberId={id as string} />
+
         {/* Dosis de hoy */}
         {todayDoses.length > 0 && (
           <Section title={`Dosis pendientes hoy (${todayDoses.length})`} accent={Colors.warning}>
@@ -191,6 +197,7 @@ export default function MemberDetailRoute() {
                     {m.frequency_text && ` · ${m.frequency_text}`}
                   </Text>
                 </View>
+                <SupplyBadge end_at={m.end_at} />
               </View>
             ))
           }
@@ -255,8 +262,12 @@ export default function MemberDetailRoute() {
             label="Dosis hoy"
             onPress={() => router.push({ pathname: '/(app)/(tabs)/medications', params: { memberId: member.id } })}
           />
-          <QuickAction icon="camera-outline" color={Colors.healthy} label="Escanear" onPress={() => router.push('/(app)/(tabs)/scan')} />
+          <QuickAction icon="shield-checkmark-outline" color={Colors.alert} label="Emergencia" onPress={() => router.push({ pathname: '/(app)/member/emergency-card', params: { memberId: id } })} />
+          <QuickAction icon="share-outline" color={Colors.primary} label="Compartir" onPress={() => router.push({ pathname: '/(app)/member/share-history', params: { memberId: id, memberName: member.first_name } })} />
         </View>
+
+        {/* Tendencias de salud */}
+        <VitalsChartsSection memberId={id as string} />
 
         {/* Visitas recientes */}
         <Section title="Visitas médicas recientes">

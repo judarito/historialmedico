@@ -55,6 +55,8 @@ export default function AppLayout() {
     <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: Colors.background } }}>
       <Stack.Screen name="(tabs)" />
       <Stack.Screen name="member/[id]" />
+      <Stack.Screen name="member/emergency-card" />
+      <Stack.Screen name="member/share-history" />
       <Stack.Screen name="confirm-scan" />
       <Stack.Screen name="add-visit" />
       <Stack.Screen name="history" />

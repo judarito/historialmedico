@@ -242,6 +242,7 @@ export default function RootLayout() {
           <Stack.Screen name="reset-password" />
           <Stack.Screen name="onboarding" />
           <Stack.Screen name="(app)" />
+          <Stack.Screen name="share" />
         </Stack>
       </SafeAreaProvider>
     </ErrorBoundary>
