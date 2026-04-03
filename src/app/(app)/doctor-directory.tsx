@@ -19,6 +19,7 @@ import {
   type MedicalDirectoryPlace,
   type MedicalDirectorySearchResponse,
 } from '../../services/medicalDirectory';
+import { supabase } from '../../services/supabase';
 import { Colors, Typography, Spacing, Radius } from '../../theme';
 
 const FEATURED_CITY_SLUGS = ['bogota', 'medellin', 'cartagena', 'barranquilla', 'cali', 'bucaramanga'];
@@ -49,12 +50,17 @@ function fallbackBadgeLabel(place: MedicalDirectoryPlace): string | null {
     .replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
+function isGoogleSource(source: MedicalDirectoryPlace['source']) {
+  return source === 'google' || source === 'google_places' || !source;
+}
+
 export default function DoctorDirectoryScreen() {
   const params = useLocalSearchParams<{ favorites?: string | string[] }>();
   const [query, setQuery] = useState('');
   const [cities, setCities] = useState<FilterOption[]>([]);
   const [specialties, setSpecialties] = useState<FilterOption[]>([]);
   const [selectedCity, setSelectedCity] = useState<string | null>(null);
+  const [cityFromProfile, setCityFromProfile] = useState(false);
   const [selectedSpecialty, setSelectedSpecialty] = useState<string | null>(null);
   const [loadingFilters, setLoadingFilters] = useState(true);
   const [loadingFavorites, setLoadingFavorites] = useState(true);
@@ -78,6 +84,7 @@ export default function DoctorDirectoryScreen() {
   useEffect(() => {
     void loadFilters();
     void loadFavorites();
+    void loadPreferredCity();
   }, []);
 
   useEffect(() => {
@@ -121,6 +128,23 @@ export default function DoctorDirectoryScreen() {
       setSearchError(error instanceof Error ? error.message : 'No se pudieron cargar los guardados');
     } finally {
       setLoadingFavorites(false);
+    }
+  }
+
+  async function loadPreferredCity() {
+    // Solo precargar si no hay ciudad ya seleccionada
+    if (selectedCity) return;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const { data } = await (supabase.rpc as any)('get_preferred_city');
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      if (data && (data as any[]).length > 0) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        setSelectedCity((data as any[])[0].slug);
+        setCityFromProfile(true);
+      }
+    } catch {
+      // silencioso, ciudad preferida es opcional
     }
   }
 
@@ -314,6 +338,18 @@ export default function DoctorDirectoryScreen() {
                   <Text style={styles.metaChipText}>{badge}</Text>
                 </View>
               ))}
+              {item.source === 'reps' && (
+                <View style={[styles.metaChip, styles.metaChipReps]}>
+                  <Ionicons name="shield-checkmark-outline" size={11} color="#2e7d32" />
+                  <Text style={[styles.metaChipText, { color: '#2e7d32' }]}>REPS</Text>
+                </View>
+              )}
+              {isGoogleSource(item.source) && (
+                <View style={[styles.metaChip, styles.metaChipGoogle]}>
+                  <Ionicons name="map-outline" size={11} color="#1565c0" />
+                  <Text style={[styles.metaChipText, { color: '#1565c0' }]}>Google</Text>
+                </View>
+              )}
               {typeof item.rating === 'number' && (
                 <View style={styles.metaChip}>
                   <Ionicons name="star" size={11} color={Colors.warning} />
@@ -382,7 +418,7 @@ export default function DoctorDirectoryScreen() {
           <View style={styles.headerText}>
             <Text style={styles.title}>Especialistas</Text>
             <Text style={styles.subtitle}>
-              {openFavoritesDirectly ? 'Tus especialistas guardados' : 'Google Places + cache compartido'}
+              {openFavoritesDirectly ? 'Tus especialistas guardados' : 'REPS + Google Places + cache compartido'}
             </Text>
           </View>
         </View>
@@ -428,7 +464,15 @@ export default function DoctorDirectoryScreen() {
             )}
           </View>
 
-          <Text style={styles.label}>Ciudades rápidas</Text>
+          <View style={styles.labelRow}>
+            <Text style={styles.label}>Ciudades rápidas</Text>
+            {cityFromProfile && selectedCityOption && (
+              <View style={styles.profileCityBadge}>
+                <Ionicons name="person-outline" size={11} color={Colors.primary} />
+                <Text style={styles.profileCityBadgeText}>{selectedCityOption.name} · Mi ciudad</Text>
+              </View>
+            )}
+          </View>
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chipsRow}>
             {loadingFilters ? (
               <ActivityIndicator color={Colors.primary} />
@@ -438,7 +482,7 @@ export default function DoctorDirectoryScreen() {
                 <TouchableOpacity
                   key={city.id}
                   style={[styles.chip, active && styles.chipActive]}
-                  onPress={() => setSelectedCity(active ? null : city.slug)}
+                  onPress={() => { setSelectedCity(active ? null : city.slug); setCityFromProfile(false); }}
                   activeOpacity={0.8}
                 >
                   <Text style={[styles.chipText, active && styles.chipTextActive]}>{city.name}</Text>
@@ -631,6 +675,30 @@ const styles = StyleSheet.create({
     fontSize: Typography.sm,
     fontWeight: Typography.medium,
     marginTop: 2,
+  },
+  labelRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    flexWrap: 'wrap',
+    gap: Spacing.xs,
+    marginTop: 2,
+  },
+  profileCityBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    backgroundColor: Colors.primary + '15',
+    borderRadius: Radius.full,
+    paddingHorizontal: Spacing.sm,
+    paddingVertical: 3,
+    borderWidth: 1,
+    borderColor: Colors.primary + '33',
+  },
+  profileCityBadgeText: {
+    color: Colors.primary,
+    fontSize: Typography.xs,
+    fontWeight: Typography.medium,
   },
   searchInputWrap: {
     flexDirection: 'row',
@@ -851,6 +919,12 @@ const styles = StyleSheet.create({
     color: Colors.textSecondary,
     fontSize: Typography.xs,
     fontWeight: Typography.medium,
+  },
+  metaChipReps: {
+    backgroundColor: '#e8f5e9',
+  },
+  metaChipGoogle: {
+    backgroundColor: '#e3f2fd',
   },
   resultActions: {
     flexDirection: 'row',

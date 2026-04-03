@@ -14,7 +14,7 @@ App móvil de historial médico familiar con IA. Permite registrar visitas, medi
 2. **Al terminar cada tarea**, incluir tabla de acciones pendientes con archivo y comando exacto.
 3. **Nunca exponer** `SUPABASE_SERVICE_ROLE_KEY` en el cliente móvil ni en edge functions que usen JWT de usuario. Usar `SUPABASE_ANON_KEY` + `Authorization: Bearer <jwt>`.
 4. **Siempre respetar multi-tenancy**: todas las queries filtran por `tenant_id`. Nunca omitir este campo en inserts.
-5. **Migraciones numeradas**: el próximo número es **039**.
+5. **Migraciones numeradas**: el próximo número es **040**.
 6. **Edge Functions desplegadas desde Dashboard deben ser autocontenidas**: evitar imports locales tipo `../_shared/*` porque el bundler web puede subir solo `source/index.ts` y romper con `Module not found`.
 7. **`.env.example` solo puede contener placeholders**. Nunca dejar API keys reales en archivos versionados, ejemplos, docs o comandos.
 
@@ -73,6 +73,7 @@ EXPO_PUBLIC_PROJECT_ID=d2e708b8-fceb-4239-8a1d-df5ce8d3d5d2
 ```
 src/app/
 ├── index.tsx                    # Resuelve sesión activa y redirige a welcome/onboarding/app
+├── share/[token].tsx            # RUTA PÚBLICA (sin auth) — muestra historial compartido vía token; llama get_shared_health_summary (grant anon)
 ├── login.tsx                    # Login con email/password
 ├── register.tsx                 # Registro de usuario
 ├── forgot-password.tsx          # Solicitud de recuperación por email
@@ -92,7 +93,9 @@ src/app/
     ├── confirm-scan.tsx         # Revisión y confirmación de fórmula procesada por IA
     ├── edit-member.tsx          # Editar datos de un miembro
     ├── history.tsx              # Historial por miembro: fallback local + RPC + expansión IA
-    ├── member/[id].tsx          # Detalle de miembro (visitas, medicamentos)
+    ├── member/[id].tsx          # Detalle de miembro (visitas, medicamentos, AdherenceCard, VitalsChartsSection, SupplyBadge en meds)
+    ├── member/emergency-card.tsx # Tarjeta de emergencia con QR; genera token vía generate_share_token
+    ├── member/share-history.tsx # Genera link de historial compartido con selector TTL (24h/48h/7d) + QR + copiar
     ├── notifications.tsx        # Campanita / inbox de notificaciones con realtime
     ├── visit/[id].tsx           # Detalle de visita (datos, vitales, medicamentos/exámenes derivados, documentos adjuntos + preview imagen/audio original; permite reprogramar citas futuras y editar/inferir diagnóstico)
     │
@@ -170,6 +173,10 @@ src/app/
 | `RuntimeDiagnosticsScreen` | `components/RuntimeDiagnosticsScreen.tsx` | Pantalla compartible de diagnóstico: muestra último error real, stack y metadata del arranque |
 | `Avatar` | `components/ui/Avatar` | Avatar con iniciales o imagen |
 | `StatCard` | `components/ui/StatCard` | Tarjeta de estadística para dashboard |
+| `SupplyBadge` | `components/ui/SupplyBadge.tsx` | Badge inline que muestra días de suministro restantes. Rojo ≤3 días, naranja 4-7 días, oculto >7 días o sin fecha fin |
+| `AdherenceCard` | `components/ui/AdherenceCard.tsx` | Tarjeta con círculo SVG de adherencia mensual. Verde ≥80%, naranja 50-79%, rojo <50%. Prop: `memberId` |
+| `VitalsChart` | `components/ui/VitalsChart.tsx` | Gráfico SVG genérico de línea temporal (mismo patrón que TemperatureChart). Prop: `data [{x,y}]`, `label`, `unit`, `color`. Requiere ≥2 puntos |
+| `VitalsChartsSection` | `components/ui/VitalsChartsSection.tsx` | Sección con múltiples VitalsChart (temperatura, presión sistólica, frecuencia cardíaca, peso). Prop: `memberId` |
 
 ---
 
@@ -227,28 +234,32 @@ src/app/
 | `037_clear_family_members_medical_data_sql_editor_fix.sql` | Permite ejecutar la limpieza clínica desde SQL Editor/admin sin chocar con `auth.uid() = NULL`, manteniendo validación por tenant en llamadas autenticadas |
 
 | `038_health_share_tokens.sql` | Tabla `health_share_tokens` para compartir historial; RPC `generate_share_token` (TTL configurable, revoca tokens previos); RPC `get_shared_health_summary` accesible por `anon` sin JWT |
+| `039_preferred_city_and_reps_source.sql` | `profiles.preferred_city_slug` FK a ciudades; `medical_directory_cities.reps_municipality_name`; mapeo de 20 ciudades → nombre exacto en API REPS; columna `source` y `reps_code` en `medical_directory_places`; RPC `get_preferred_city` y `set_preferred_city` |
 
-**Próxima migración:** `039_...sql`
+**Próxima migración:** `040_...sql`
 
 ---
 
 ## Directorio médico externo
 
-**Objetivo actual:** buscar especialistas/lugares médicos de Colombia usando Google Places como fuente inicial, pero sirviendo búsquedas repetidas desde Supabase para bajar costo y latencia.
+**Objetivo actual:** buscar especialistas/lugares médicos de Colombia usando la API oficial REPS (datos.gov.co) como fuente primaria; Google Places como fallback cuando REPS no devuelve resultados. Cache compartido en Supabase para bajar costo y latencia.
 
 **Piezas nuevas:**
 - Tablas globales `medical_directory_cities` y `medical_directory_specialties` para normalizar intención.
 - Cache compartido en `medical_directory_search_cache` + `medical_directory_search_cache_results`.
-- Catálogo refrescable de lugares en `medical_directory_places`.
+- Catálogo refrescable de lugares en `medical_directory_places` (columnas `source`, `reps_code` agregadas en migración 039).
 - Cache de detalle en `medical_directory_places.detail_*` para cargar teléfono/web/horarios solo cuando el usuario abre una ficha.
 - Favoritos por usuario en `medical_directory_favorites`.
 - Métricas básicas en `medical_directory_search_events`.
-- Edge Function `search-medical-places` con auth obligatoria, normalización, cache y lock compartido por `cache_key`.
+- Edge Function `search-medical-places`: primero consulta REPS API → si falla o devuelve 0 → Google Places. Cache REPS: 7 días; Google: 24h.
 - Edge Function `get-medical-place-details` para enriquecer una ficha puntual bajo demanda.
 - La lista ya no usa solo el orden de Google: la Edge Function calcula `local_score`, `place_kind`, `badge_labels` y marca `is_favorite` para priorizar mejor especialista/consultorio/clínica frente a resultados más ruidosos.
-- Inicio (`(tabs)/index.tsx`) muestra un acceso directo con conteo real de guardados; Perfil (`(tabs)/profile.tsx`) tambien deja abrir el directorio ya filtrado en favoritos.
+- Inicio (`(tabs)/index.tsx`) muestra un acceso directo con conteo real de guardados; Perfil (`(tabs)/profile.tsx`) también deja abrir el directorio ya filtrado en favoritos **y permite configurar la ciudad preferida**.
 - Tanto `doctor-directory` como `doctor-place/[id]` ya pueden abrir `add-visit` con medico/especialidad/institucion precargados; si el usuario llega sin `memberId`, `add-visit` deja escoger el familiar antes de guardar.
 - En `doctor-directory`, el toggle `Solo favoritos` ya busca localmente sobre `favoritePlaces` usando texto, ciudad y especialidad; no vuelve a Google mientras ese modo está activo.
+- `doctor-directory` carga automáticamente la ciudad preferida del perfil del usuario al abrir.
+
+**REPS API:** `https://www.datos.gov.co/resource/c36g-9fc2.json` — campo ciudad: `municipioprestadordesc` (NO `departamento`). Clave sintética para registros REPS: `google_place_id = reps_${codigoprestador}`. TTL cache: 7 días.
 
 **Regla de costos:** la búsqueda inicial pide solo campos tipo lista; teléfono/rating quedan como campos opcionales (`includeRichFields`) para no subir el costo por defecto.
 
@@ -346,6 +357,10 @@ UI de resultados
 
 ## Estado real tras cambios recientes
 
+- El directorio médico ahora usa REPS (API oficial colombiana) como fuente primaria y Google Places como fallback. Los registros REPS se guardan con `source='reps'` y clave sintética `google_place_id=reps_${codigoprestador}`.
+- **Fix:** el cache de búsqueda ignoraba REPS si ya existía un cache válido de Google para esa ciudad. Corregido: si `isRepsEligible && !cacheHasRepsData`, se salta el cache hit/stale y se fuerza el refresh path donde se consulta REPS.
+- Los usuarios pueden configurar una ciudad preferida en su perfil; el directorio la precarga automáticamente.
+- Desde el detalle de un miembro es posible generar una tarjeta de emergencia con QR y un link de historial compartido con TTL configurable. Ambas funciones usan `health_share_tokens` + `get_shared_health_summary` (accesible por `anon`).
 - `process-prescription` ya no usa DeepSeek para imágenes. La extracción OCR/visión de fotos está migrada a OpenAI (`gpt-4.1-mini`).
 - `voice-to-data` y `search-ai` permanecen en DeepSeek.
 - Cuando la IA sugiere un diagnóstico, ahora puede devolverlo como `Diagnóstico técnico (explicación sencilla)` para que siga siendo útil también para cuidadores.
@@ -364,6 +379,28 @@ UI de resultados
 - El build Android local depende de tener `node`, JDK 17 y Android SDK válidos en la máquina; hoy el proyecto tolera mejor `NODE_BINARY` y `local.properties`, pero sigue requiriendo un entorno nativo sano.
 
 ---
+
+## Cambios de hoy (2026-04-03)
+
+- **Fix REPS bypass cache:** `supabase/functions/search-medical-places/index.ts` — si la ciudad tiene `reps_municipality_name` pero el cache existente solo tiene `source='google'`, se ignora el cache (hit y stale) y se fuerza el refresh path para consultar REPS. Variables `isRepsEligible`, `cacheHasRepsData`, `skipCacheForReps`.
+- **Badge fuente en tarjeta directorio:** `src/app/(app)/doctor-directory.tsx` — cada tarjeta muestra badge verde "REPS" (escudo) o badge azul "Google" (mapa) según `item.source`. Estilos `metaChipReps` y `metaChipGoogle` agregados.
+- **`source` en interfaz cliente:** `src/services/medicalDirectory.ts` — `MedicalDirectoryPlace` ahora incluye `source?: 'google' | 'reps' | 'manual'`.
+
+## Cambios de hoy (2026-04-01)
+
+- **Tarjeta de emergencia:** `src/app/(app)/member/emergency-card.tsx` — muestra datos críticos (tipo de sangre, alergias, condiciones crónicas, contacto de emergencia) + QR de acceso rápido. Fix: tabla `family_members` no tiene `full_name`; se usa `first_name` + `last_name`.
+- **Compartir historial:** `src/app/(app)/member/share-history.tsx` — selección de TTL (24h/48h/7d), genera link vía RPC `generate_share_token`, muestra QR + botón copiar (`expo-clipboard`) + botón compartir (`Share` API).
+- **Vista pública:** `src/app/share/[token].tsx` — ruta sin auth que llama `get_shared_health_summary(p_token)` (concedido a `anon`). Muestra miembro, alergias, condiciones, medicamentos activos, visitas recientes y exámenes pendientes. Fix: interfaz `SharedSummary.member` usa `first_name`/`last_name`, no `full_name`.
+- **Migración 038:** `supabase/migrations/038_health_share_tokens.sql` — tabla `health_share_tokens`, RPCs `generate_share_token` y `get_shared_health_summary` (GRANT TO anon).
+- **Badges de suministro:** `src/components/ui/SupplyBadge.tsx` integrado en `member/[id].tsx` dentro de cada medicamento activo.
+- **Adherencia mensual:** `src/components/ui/AdherenceCard.tsx` integrado en `member/[id].tsx`.
+- **Gráficos de vitales:** `src/components/ui/VitalsChart.tsx` + `VitalsChartsSection.tsx` integrados en `member/[id].tsx`.
+- **Botones quick actions en detalle de miembro:** se agregaron Emergencia y Compartir; se eliminó el botón Escanear.
+- **Directorio médico — fuente REPS:** `supabase/functions/search-medical-places/index.ts` ahora consulta primero la API oficial REPS (datos.gov.co) para búsquedas por ciudad; cae a Google Places si REPS falla o devuelve 0 resultados. Cache REPS: 7 días.
+- **Migración 039:** `supabase/migrations/039_preferred_city_and_reps_source.sql` — `profiles.preferred_city_slug`, `medical_directory_cities.reps_municipality_name`, mapeo de 20 ciudades, columnas `source`/`reps_code` en `medical_directory_places`.
+- **Ciudad preferida en perfil:** `src/app/(app)/(tabs)/profile.tsx` — sección "Mi ciudad" con modal picker de ciudades; guarda con RPC `set_preferred_city`.
+- **Auto-preload de ciudad en directorio:** `src/app/(app)/doctor-directory.tsx` — carga silenciosa de ciudad preferida al abrir la pantalla.
+- **Medications con alerta de vencimiento:** `src/app/(app)/(tabs)/medications.tsx` — banner de advertencia para tratamientos que vencen en ≤7 días.
 
 ## Cambios de hoy (2026-03-30)
 

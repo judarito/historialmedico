@@ -10,6 +10,7 @@ import {
   ActivityIndicator,
   KeyboardAvoidingView,
   Platform,
+  Modal,
 } from 'react-native';
 import { router, useFocusEffect } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -139,6 +140,10 @@ export default function ProfileTab() {
   const [mutatingAccessKey, setMutatingAccessKey] = useState<string | null>(null);
   const [directoryFavoritesCount, setDirectoryFavoritesCount] = useState(0);
   const [loadingDirectorySummary, setLoadingDirectorySummary] = useState(false);
+  const [preferredCity, setPreferredCity] = useState<{ slug: string; name: string } | null>(null);
+  const [cities, setCities] = useState<{ slug: string; name: string }[]>([]);
+  const [savingCity, setSavingCity] = useState(false);
+  const [showCityPicker, setShowCityPicker] = useState(false);
 
   const fullName = user?.user_metadata?.full_name ?? user?.email?.split('@')[0] ?? 'Usuario';
   const email = user?.email ?? '';
@@ -169,6 +174,21 @@ export default function ProfileTab() {
 
     setDirectoryFavoritesCount(count ?? 0);
   }, [user?.id]);
+
+  const loadCityPreferences = useCallback(async () => {
+    const [{ data: citiesData }, { data: cityData }] = await Promise.all([
+      supabase
+        .from('medical_directory_cities')
+        .select('slug, name')
+        .eq('is_active', true)
+        .order('name', { ascending: true }),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (supabase.rpc as any)('get_preferred_city'),
+    ]);
+    if (citiesData) setCities(citiesData);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    if (cityData && (cityData as any[]).length > 0) setPreferredCity((cityData as any[])[0]);
+  }, []);
 
   async function loadAccessData() {
     if (!tenant?.id) {
@@ -215,11 +235,13 @@ export default function ProfileTab() {
 
   useEffect(() => {
     void loadDirectorySummary();
-  }, [loadDirectorySummary]);
+    void loadCityPreferences();
+  }, [loadDirectorySummary, loadCityPreferences]);
 
   useFocusEffect(useCallback(() => {
     void loadDirectorySummary();
-  }, [loadDirectorySummary]));
+    void loadCityPreferences();
+  }, [loadDirectorySummary, loadCityPreferences]));
 
   useEffect(() => {
     if (assignableRoles.length === 0) return;
@@ -361,6 +383,20 @@ export default function ProfileTab() {
         },
       ]
     );
+  }
+
+  async function handleSaveCity(slug: string | null) {
+    setSavingCity(true);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (supabase.rpc as any)('set_preferred_city', { p_city_slug: slug });
+    if (slug === null) {
+      setPreferredCity(null);
+    } else {
+      const found = cities.find((c) => c.slug === slug);
+      if (found) setPreferredCity(found);
+    }
+    setSavingCity(false);
+    setShowCityPicker(false);
   }
 
   async function handleSignOut() {
@@ -686,6 +722,28 @@ export default function ProfileTab() {
           </Section>
         )}
 
+        {/* Ciudad preferida */}
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Mi ciudad</Text>
+          <TouchableOpacity
+            style={styles.cityRow}
+            onPress={() => setShowCityPicker(true)}
+            activeOpacity={0.7}
+          >
+            <Ionicons name="location-outline" size={18} color={Colors.primary} />
+            <Text style={styles.cityName}>
+              {preferredCity ? preferredCity.name : 'Sin ciudad seleccionada'}
+            </Text>
+            {savingCity
+              ? <ActivityIndicator size="small" color={Colors.primary} />
+              : <Ionicons name="chevron-forward" size={16} color={Colors.textMuted} />
+            }
+          </TouchableOpacity>
+          <Text style={styles.cityHint}>
+            Se usará como ciudad por defecto al buscar especialistas
+          </Text>
+        </View>
+
         <Section title="Directorio médico">
           <InfoRow
             icon="star-outline"
@@ -729,6 +787,51 @@ export default function ProfileTab() {
 
           <Text style={styles.version}>Family Health Tracker IA v1.0.0</Text>
         </ScrollView>
+
+        <Modal
+          visible={showCityPicker}
+          animationType="slide"
+          transparent
+          onRequestClose={() => setShowCityPicker(false)}
+        >
+          <View style={styles.modalOverlay}>
+            <View style={styles.modalSheet}>
+              <View style={styles.modalHeader}>
+                <Text style={styles.modalTitle}>Selecciona tu ciudad</Text>
+                <TouchableOpacity onPress={() => setShowCityPicker(false)} activeOpacity={0.7}>
+                  <Ionicons name="close" size={22} color={Colors.textSecondary} />
+                </TouchableOpacity>
+              </View>
+
+              <ScrollView style={styles.modalList} keyboardShouldPersistTaps="handled">
+                <TouchableOpacity
+                  style={styles.cityOption}
+                  onPress={() => { void handleSaveCity(null); }}
+                  activeOpacity={0.7}
+                >
+                  <Text style={styles.cityOptionText}>Sin preferencia</Text>
+                  {preferredCity === null && (
+                    <Ionicons name="checkmark" size={18} color={Colors.primary} />
+                  )}
+                </TouchableOpacity>
+
+                {cities.map((city) => (
+                  <TouchableOpacity
+                    key={city.slug}
+                    style={styles.cityOption}
+                    onPress={() => { void handleSaveCity(city.slug); }}
+                    activeOpacity={0.7}
+                  >
+                    <Text style={styles.cityOptionText}>{city.name}</Text>
+                    {preferredCity?.slug === city.slug && (
+                      <Ionicons name="checkmark" size={18} color={Colors.primary} />
+                    )}
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            </View>
+          </View>
+        </Modal>
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
@@ -1044,5 +1147,71 @@ const styles = StyleSheet.create({
     color: Colors.textMuted,
     fontSize: Typography.xs,
     textAlign: 'center',
+  },
+
+  cityRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.sm,
+    backgroundColor: Colors.surface,
+    borderRadius: Radius.lg,
+    padding: Spacing.md,
+    borderWidth: 1,
+    borderColor: Colors.border,
+  },
+  cityName: {
+    flex: 1,
+    color: Colors.textPrimary,
+    fontSize: Typography.base,
+  },
+  cityHint: {
+    color: Colors.textMuted,
+    fontSize: Typography.xs,
+    marginTop: 4,
+    paddingHorizontal: 4,
+  },
+
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    justifyContent: 'flex-end',
+  },
+  modalSheet: {
+    backgroundColor: Colors.surface,
+    borderTopLeftRadius: Radius.xl,
+    borderTopRightRadius: Radius.xl,
+    paddingTop: Spacing.md,
+    paddingBottom: Spacing.xxxl,
+    maxHeight: '70%',
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: Spacing.base,
+    paddingBottom: Spacing.md,
+    borderBottomWidth: 1,
+    borderBottomColor: Colors.border,
+  },
+  modalTitle: {
+    color: Colors.textPrimary,
+    fontSize: Typography.lg,
+    fontWeight: Typography.bold,
+  },
+  modalList: {
+    paddingTop: Spacing.xs,
+  },
+  cityOption: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: Spacing.base,
+    paddingVertical: Spacing.md,
+    borderBottomWidth: 1,
+    borderBottomColor: Colors.border,
+  },
+  cityOptionText: {
+    color: Colors.textPrimary,
+    fontSize: Typography.base,
   },
 });

@@ -11,6 +11,8 @@ const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const GOOGLE_TEXT_SEARCH_URL = "https://places.googleapis.com/v1/places:searchText";
+const REPS_API_URL = "https://www.datos.gov.co/resource/c36g-9fc2.json";
+const REPS_PAGE_SIZE = 100;
 
 const LOOKUP_CACHE_TTL_MS = 5 * 60 * 1000;
 const LOCK_TTL_SECONDS = 90;
@@ -47,6 +49,20 @@ interface CityRow {
   centroid_lat: number;
   centroid_lng: number;
   search_aliases: string[] | null;
+  reps_municipality_name: string | null;
+}
+
+interface RepsPlace {
+  codigoprestador?: string;
+  codigohabilitacionsede?: string;
+  nombreprestador?: string;
+  nombresede?: string;
+  claseprestador?: string;
+  direccionprestador?: string;
+  telefonoprestador?: string;
+  email_prestador?: string;
+  municipioprestadordesc?: string;
+  departamentoprestadordesc?: string;
 }
 
 interface SpecialtyRow {
@@ -78,6 +94,8 @@ interface DirectoryPlaceRow {
   place_kind_label?: string;
   badge_labels?: string[];
   is_favorite?: boolean;
+  source?: string;
+  reps_code?: string | null;
 }
 
 interface SearchCacheRow {
@@ -85,6 +103,7 @@ interface SearchCacheRow {
   status: string;
   expires_at: string | null;
   google_next_page_token: string | null;
+  google_called_count: number;
   result_count: number;
   hit_count: number;
   refresh_token: string | null;
@@ -114,6 +133,27 @@ interface GooglePlace {
   googleMapsUri?: string;
   businessStatus?: string;
   nationalPhoneNumber?: string;
+}
+
+interface DirectoryPlaceUpsertRow {
+  google_place_id: string;
+  display_name: string;
+  formatted_address: string | null;
+  national_phone: string | null;
+  latitude: number | null;
+  longitude: number | null;
+  primary_type: string | null;
+  types: string[];
+  rating: number | null;
+  user_rating_count: number | null;
+  google_maps_uri: string | null;
+  business_status: string | null;
+  city_slug: string | null;
+  source: string;
+  reps_code?: string | null;
+  metadata: Record<string, unknown>;
+  last_google_sync_at: string;
+  expires_at: string;
 }
 
 interface SearchResponse {
@@ -182,7 +222,7 @@ async function loadLookups() {
   const [{ data: cities, error: citiesError }, { data: specialties, error: specialtiesError }] = await Promise.all([
     adminSupabase
       .from("medical_directory_cities")
-      .select("id, slug, name, department, centroid_lat, centroid_lng, search_aliases")
+      .select("id, slug, name, department, centroid_lat, centroid_lng, search_aliases, reps_municipality_name")
       .eq("is_active", true)
       .order("name", { ascending: true }),
     adminSupabase
@@ -610,7 +650,9 @@ async function getCachedPlaces(cacheId: string): Promise<DirectoryPlaceRow[]> {
       user_rating_count,
       google_maps_uri,
       business_status,
-      city_slug
+      city_slug,
+      source,
+      reps_code
     `)
     .in("id", placeIds);
 
@@ -622,7 +664,7 @@ async function getCachedPlaces(cacheId: string): Promise<DirectoryPlaceRow[]> {
   }
 
   return rows
-    .map((row) => {
+    .map((row): DirectoryPlaceRow | null => {
       const place = byId.get(row.place_id);
       if (!place) return null;
       return {
@@ -678,6 +720,172 @@ async function markCacheServed(cacheRow: SearchCacheRow) {
   } catch (error) {
     console.error("No se pudo incrementar hit_count del cache:", error);
   }
+}
+
+function escapeSocrataLiteral(value: string): string {
+  return value.replace(/'/g, "''");
+}
+
+function buildRepsWhereClause(params: {
+  city: CityRow;
+  queryNormalized: string;
+}): string {
+  const clauses = [
+    `municipioprestadordesc='${escapeSocrataLiteral(params.city.reps_municipality_name ?? "")}'`,
+  ];
+
+  const queryTokens = Array.from(new Set(
+    params.queryNormalized
+      .split(" ")
+      .map((token) => token.trim())
+      .filter((token) => token.length >= 3)
+  )).slice(0, 4);
+
+  if (queryTokens.length > 0) {
+    clauses.push(`(${queryTokens.map((token) => {
+      const escapedToken = escapeSocrataLiteral(token.toUpperCase());
+      return `(upper(nombreprestador) like '%${escapedToken}%' OR upper(nombresede) like '%${escapedToken}%')`;
+    }).join(" AND ")})`);
+  }
+
+  return clauses.join(" AND ");
+}
+
+function dedupeRowsByGooglePlaceId<T extends { google_place_id: string }>(rows: T[]): T[] {
+  const seen = new Set<string>();
+  const uniqueRows: T[] = [];
+
+  for (const row of rows) {
+    if (seen.has(row.google_place_id)) continue;
+    seen.add(row.google_place_id);
+    uniqueRows.push(row);
+  }
+
+  return uniqueRows;
+}
+
+function buildDirectoryIdentityKey(place: Pick<DirectoryPlaceUpsertRow, "display_name" | "formatted_address" | "primary_type">): string {
+  const name = normalizeText(place.display_name);
+  const address = normalizeText(place.formatted_address ?? "");
+  const primaryType = normalizeText(place.primary_type ?? "");
+  return `${name}|${address || primaryType}`;
+}
+
+function mergeSearchResultRows(groups: DirectoryPlaceUpsertRow[][], limit: number): DirectoryPlaceUpsertRow[] {
+  const seenGoogleIds = new Set<string>();
+  const seenIdentityKeys = new Set<string>();
+  const merged: DirectoryPlaceUpsertRow[] = [];
+
+  for (const group of groups) {
+    for (const row of group) {
+      if (seenGoogleIds.has(row.google_place_id)) continue;
+
+      const identityKey = buildDirectoryIdentityKey(row);
+      if (seenIdentityKeys.has(identityKey)) continue;
+
+      seenGoogleIds.add(row.google_place_id);
+      seenIdentityKeys.add(identityKey);
+      merged.push(row);
+
+      if (merged.length >= limit) {
+        return merged;
+      }
+    }
+  }
+
+  return merged;
+}
+
+async function callRepsApi(params: {
+  city: CityRow;
+  pageSize?: number;
+  queryNormalized: string;
+}): Promise<RepsPlace[]> {
+  const municipio = params.city.reps_municipality_name;
+  if (!municipio) return [];
+
+  const url = new URL(REPS_API_URL);
+  url.searchParams.set("$where", buildRepsWhereClause(params));
+  url.searchParams.set("$limit", String(params.pageSize ?? REPS_PAGE_SIZE));
+  url.searchParams.set("$order", "nombreprestador ASC");
+
+  const response = await fetch(url.toString(), { headers: { "Accept": "application/json" } });
+  if (!response.ok) {
+    console.warn(`REPS API error ${response.status} para municipio ${municipio}`);
+    return [];
+  }
+  const data = await response.json() as RepsPlace[];
+  return Array.isArray(data) ? data : [];
+}
+
+function repsPlaceToDirectoryRow(place: RepsPlace, city: CityRow) {
+  const name = ((place.nombresede || place.nombreprestador) ?? "Prestador de salud").trim();
+  const clase = (place.claseprestador ?? "").toLowerCase();
+  const normalizedNameCode = normalizeText(name).replace(/\s+/g, "-");
+  const uniqueCode = place.codigohabilitacionsede
+    ?? place.codigoprestador
+    ?? (normalizedNameCode || crypto.randomUUID());
+
+  let primaryType = "health_service";
+  if (clase.includes("hospital")) primaryType = "hospital";
+  else if (clase.includes("clinica") || clase.includes("clínica")) primaryType = "medical_clinic";
+  else if (clase.includes("consultorio") || clase.includes("medico") || clase.includes("médico")) primaryType = "doctor";
+  else if (clase.includes("laboratorio")) primaryType = "medical_lab";
+
+  return {
+    google_place_id: `reps_${uniqueCode}`,
+    display_name: name,
+    formatted_address: place.direccionprestador ? `${place.direccionprestador}, ${city.name}` : null,
+    national_phone: place.telefonoprestador ?? null,
+    latitude: null as number | null,
+    longitude: null as number | null,
+    primary_type: primaryType,
+    types: [primaryType],
+    rating: null as number | null,
+    user_rating_count: null as number | null,
+    google_maps_uri: null as string | null,
+    business_status: "OPERATIONAL",
+    city_slug: city.slug,
+    source: "reps",
+    reps_code: place.codigoprestador ?? null,
+    metadata: { last_search_mode: "city", last_city_slug: city.slug, last_specialty_slug: null },
+    last_google_sync_at: new Date().toISOString(),
+    expires_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+  } satisfies DirectoryPlaceUpsertRow;
+}
+
+function googlePlaceToDirectoryRow(params: {
+  place: GooglePlace;
+  nowIso: string;
+  expiresAt: string;
+  searchMode: SearchMode;
+  city: CityRow | null;
+  specialty: SpecialtyRow | null;
+}): DirectoryPlaceUpsertRow {
+  const { place, nowIso, expiresAt, searchMode, city, specialty } = params;
+  return {
+    google_place_id: place.id,
+    display_name: place.displayName?.text?.trim() || "Lugar medico",
+    formatted_address: place.formattedAddress ?? null,
+    national_phone: place.nationalPhoneNumber ?? null,
+    latitude: isFiniteNumber(place.location?.latitude) ? place.location!.latitude : null,
+    longitude: isFiniteNumber(place.location?.longitude) ? place.location!.longitude : null,
+    primary_type: place.primaryType ?? null,
+    types: place.types ?? [],
+    rating: isFiniteNumber(place.rating) ? Number(place.rating.toFixed(2)) : null,
+    user_rating_count: typeof place.userRatingCount === "number" ? place.userRatingCount : null,
+    google_maps_uri: place.googleMapsUri ?? null,
+    business_status: place.businessStatus ?? null,
+    city_slug: city?.slug ?? null,
+    source: "google_places",
+    metadata: {
+      last_search_mode: searchMode,
+      last_city_slug: city?.slug ?? null,
+      last_specialty_slug: specialty?.slug ?? null,
+    },
+    last_google_sync_at: nowIso,
+    expires_at: expiresAt,
+  };
 }
 
 async function callGooglePlaces(params: {
@@ -746,45 +954,23 @@ async function callGooglePlaces(params: {
 async function syncPlacesAndCache(params: {
   cacheId: string;
   refreshToken: string;
-  googlePlaces: GooglePlace[];
+  placeRows: DirectoryPlaceUpsertRow[];
+  orderedResultGooglePlaceIds: string[];
+  googlePlaceIdsForSpecialty?: string[];
   nextPageToken: string | null;
   searchMode: SearchMode;
-  city: CityRow | null;
   specialty: SpecialtyRow | null;
+  googleCalled: boolean;
 }) {
   const nowIso = new Date().toISOString();
-  const expiresAt = new Date(Date.now() + getCacheTtlHours(params.searchMode, params.googlePlaces.length) * 60 * 60 * 1000).toISOString();
-
-  const placeRows = params.googlePlaces.map((place) => ({
-    google_place_id: place.id,
-    display_name: place.displayName?.text?.trim() || "Lugar medico",
-    formatted_address: place.formattedAddress ?? null,
-    national_phone: place.nationalPhoneNumber ?? null,
-    latitude: isFiniteNumber(place.location?.latitude) ? place.location!.latitude : null,
-    longitude: isFiniteNumber(place.location?.longitude) ? place.location!.longitude : null,
-    primary_type: place.primaryType ?? null,
-    types: place.types ?? [],
-    rating: isFiniteNumber(place.rating) ? Number(place.rating.toFixed(2)) : null,
-    user_rating_count: typeof place.userRatingCount === "number" ? place.userRatingCount : null,
-    google_maps_uri: place.googleMapsUri ?? null,
-    business_status: place.businessStatus ?? null,
-    city_slug: params.city?.slug ?? null,
-    source: "google_places",
-    metadata: {
-      last_search_mode: params.searchMode,
-      last_city_slug: params.city?.slug ?? null,
-      last_specialty_slug: params.specialty?.slug ?? null,
-    },
-    last_google_sync_at: nowIso,
-    expires_at: expiresAt,
-  }));
+  const expiresAt = new Date(Date.now() + getCacheTtlHours(params.searchMode, params.orderedResultGooglePlaceIds.length) * 60 * 60 * 1000).toISOString();
 
   let placeIdByGoogleId = new Map<string, string>();
 
-  if (placeRows.length > 0) {
+  if (params.placeRows.length > 0) {
     const { data: upsertedPlaces, error: placeError } = await adminSupabase
       .from("medical_directory_places")
-      .upsert(placeRows, { onConflict: "google_place_id" })
+      .upsert(params.placeRows, { onConflict: "google_place_id" })
       .select("id, google_place_id");
 
     if (placeError) throw placeError;
@@ -794,17 +980,29 @@ async function syncPlacesAndCache(params: {
     }
   }
 
-  if (params.specialty && placeIdByGoogleId.size > 0) {
+  if (params.specialty && placeIdByGoogleId.size > 0 && (params.googlePlaceIdsForSpecialty?.length ?? 0) > 0) {
     await adminSupabase
       .from("medical_directory_place_specialties")
       .upsert(
-        Array.from(placeIdByGoogleId.values()).map((placeId) => ({
-          place_id: placeId,
-          specialty_id: params.specialty!.id,
-          source: "query_inference",
-          confidence: 0.65,
-          is_primary: true,
-        })),
+        params.googlePlaceIdsForSpecialty!
+          .map((googlePlaceId) => {
+            const placeId = placeIdByGoogleId.get(googlePlaceId);
+            if (!placeId) return null;
+            return {
+              place_id: placeId,
+              specialty_id: params.specialty!.id,
+              source: "query_inference",
+              confidence: 0.65,
+              is_primary: true,
+            };
+          })
+          .filter((row): row is {
+            place_id: string;
+            specialty_id: string;
+            source: string;
+            confidence: number;
+            is_primary: boolean;
+          } => Boolean(row)),
         { onConflict: "place_id,specialty_id,source" }
       );
   }
@@ -815,9 +1013,9 @@ async function syncPlacesAndCache(params: {
     .eq("cache_id", params.cacheId);
 
   if (placeIdByGoogleId.size > 0) {
-    const cacheResultsRows = params.googlePlaces
-      .map((place, index) => {
-        const placeId = placeIdByGoogleId.get(place.id);
+    const cacheResultsRows = params.orderedResultGooglePlaceIds
+      .map((googlePlaceId, index) => {
+        const placeId = placeIdByGoogleId.get(googlePlaceId);
         if (!placeId) return null;
         return {
           cache_id: params.cacheId,
@@ -845,9 +1043,9 @@ async function syncPlacesAndCache(params: {
     .from("medical_directory_search_cache")
     .update({
       status: "ready",
-      result_count: params.googlePlaces.length,
+      result_count: params.orderedResultGooglePlaceIds.length,
       google_next_page_token: params.nextPageToken,
-      google_called_count: 1,
+      google_called_count: params.googleCalled ? 1 : 0,
       last_google_sync_at: nowIso,
       expires_at: expiresAt,
       refresh_started_at: null,
@@ -947,7 +1145,7 @@ serve(async (req) => {
 
     const { data: cacheRowData, error: cacheRowError } = await adminSupabase
       .from("medical_directory_search_cache")
-      .select("id, status, expires_at, google_next_page_token, result_count, refresh_token, hit_count")
+      .select("id, status, expires_at, google_next_page_token, google_called_count, result_count, refresh_token, hit_count")
       .eq("cache_key", cacheKey)
       .maybeSingle();
 
@@ -970,7 +1168,19 @@ serve(async (req) => {
       cacheRow?.expires_at && new Date(cacheRow.expires_at).getTime() > Date.now()
     );
 
-    if (cacheRow && decoratedCachedPlaces.length > 0 && isFresh && !forceRefresh) {
+    // Si la ciudad tiene mapeo REPS y el cache solo tiene resultados de Google,
+    // ignorar el cache para que el refresh path consulte REPS.
+    const isRepsEligible = Boolean(
+      city?.reps_municipality_name && searchMode === "city" && page === 1 && !body.pageToken
+    );
+    const cacheHasRepsData = cachedPlaces.some((p) => p.source === "reps");
+    const cacheHasGoogleData = cachedPlaces.some((p) => p.source === "google_places" || p.source === "google");
+    const cacheNeedsGoogleComplement = decoratedCachedPlaces.length < pageSize
+      && !cacheHasGoogleData
+      && (cacheRow?.google_called_count ?? 0) === 0;
+    const skipCacheForReps = isRepsEligible && (!cacheHasRepsData || cacheNeedsGoogleComplement);
+
+    if (cacheRow && decoratedCachedPlaces.length > 0 && isFresh && !forceRefresh && !skipCacheForReps) {
       await markCacheServed(cacheRow);
 
       const response: SearchResponse = {
@@ -1011,7 +1221,7 @@ serve(async (req) => {
       });
     }
 
-    if (cacheRow && decoratedCachedPlaces.length > 0 && !forceRefresh) {
+    if (cacheRow && decoratedCachedPlaces.length > 0 && !forceRefresh && !skipCacheForReps) {
       await markCacheServed(cacheRow);
 
       const response: SearchResponse = {
@@ -1184,26 +1394,77 @@ serve(async (req) => {
     }
 
     try {
-      const googleData = await callGooglePlaces({
-        query: googleQuery,
-        pageSize,
-        pageToken: body.pageToken ?? null,
-        searchMode,
-        city,
-        latitude: body.latitude,
-        longitude: body.longitude,
-        radiusMeters: body.radiusMeters,
-        includeRichFields,
-      });
+      // REPS primero: si hay ciudad con municipio REPS mapeado, consulta la API oficial colombiana
+      let repsRows: DirectoryPlaceUpsertRow[] = [];
+      if (city?.reps_municipality_name && searchMode === "city" && page === 1 && !body.pageToken) {
+        try {
+          const repsPlaces = await callRepsApi({
+            city,
+            pageSize: REPS_PAGE_SIZE,
+            queryNormalized: queryNormalized || normalizeText(googleQuery),
+          });
+          if (repsPlaces.length > 0) {
+            repsRows = dedupeRowsByGooglePlaceId(repsPlaces.map((p) => repsPlaceToDirectoryRow(p, city)));
+          }
+        } catch (repsError) {
+          console.warn("REPS API falló, cayendo a Google Places:", repsError);
+        }
+      }
+
+      const shouldComplementWithGoogle = !(
+        city?.reps_municipality_name
+        && searchMode === "city"
+        && page === 1
+        && !body.pageToken
+      ) || repsRows.length < pageSize;
+
+      let nextPageTokenResult: string | null = null;
+      let didCallGoogle = false;
+      let googleRows: DirectoryPlaceUpsertRow[] = [];
+      if (shouldComplementWithGoogle) {
+        didCallGoogle = true;
+        const googleData = await callGooglePlaces({
+          query: googleQuery,
+          pageSize,
+          pageToken: body.pageToken ?? null,
+          searchMode,
+          city,
+          latitude: body.latitude,
+          longitude: body.longitude,
+          radiusMeters: body.radiusMeters,
+          includeRichFields,
+        });
+        nextPageTokenResult = googleData.nextPageToken;
+        const nowIso = new Date().toISOString();
+        const googleExpiresAt = new Date(
+          Date.now() + getCacheTtlHours(searchMode, googleData.places.length) * 60 * 60 * 1000
+        ).toISOString();
+        googleRows = googleData.places.map((place) => googlePlaceToDirectoryRow({
+          place,
+          nowIso,
+          expiresAt: googleExpiresAt,
+          searchMode,
+          city,
+          specialty,
+        }));
+      }
+
+      const orderedRows = mergeSearchResultRows(
+        [repsRows, googleRows],
+        pageSize
+      );
+      const allRowsForUpsert = dedupeRowsByGooglePlaceId([...repsRows, ...googleRows]);
 
       await syncPlacesAndCache({
         cacheId: claim.cache_id,
         refreshToken: claim.refresh_token,
-        googlePlaces: googleData.places,
-        nextPageToken: googleData.nextPageToken,
+        placeRows: allRowsForUpsert,
+        orderedResultGooglePlaceIds: orderedRows.map((row) => row.google_place_id),
+        googlePlaceIdsForSpecialty: googleRows.map((row) => row.google_place_id),
+        nextPageToken: nextPageTokenResult,
         searchMode,
-        city,
         specialty,
+        googleCalled: didCallGoogle,
       });
 
       const refreshedPlaces = await getCachedPlaces(claim.cache_id);
@@ -1222,7 +1483,7 @@ serve(async (req) => {
         results: decoratedRefreshedPlaces,
         meta: {
           cacheStatus: "refreshed",
-          googleCalled: true,
+          googleCalled: didCallGoogle,
           stale: false,
           shouldRefresh: false,
           normalizedQuery: queryNormalized || normalizeText(googleQuery),
@@ -1231,7 +1492,10 @@ serve(async (req) => {
           pageSize,
           city: city ? { slug: city.slug, name: city.name } : null,
           specialty: specialty ? { slug: specialty.slug, displayName: specialty.display_name } : null,
-          nextPageToken: googleData.nextPageToken,
+          nextPageToken: nextPageTokenResult,
+          warning: repsRows.length > 0 && googleRows.length > 0
+            ? "Mostrando coincidencias de REPS y resultados complementarios de Google Places."
+            : undefined,
         },
       };
 
@@ -1245,7 +1509,7 @@ serve(async (req) => {
         searchMode,
         page,
         cacheStatus: "refreshed",
-        googleCalled: true,
+        googleCalled: didCallGoogle,
         resultCount: decoratedRefreshedPlaces.length,
         latencyMs: Date.now() - startedAt,
       });

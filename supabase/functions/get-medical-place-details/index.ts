@@ -26,6 +26,7 @@ interface DetailsRequest {
 interface DirectoryPlaceDetailsRow {
   id: string;
   google_place_id: string;
+  source: string | null;
   display_name: string;
   formatted_address: string | null;
   national_phone: string | null;
@@ -183,12 +184,17 @@ function hasFreshDetails(place: DirectoryPlaceDetailsRow, forceRefresh: boolean)
   return new Date(place.detail_expires_at).getTime() > Date.now();
 }
 
+function isGoogleBackedPlace(place: Pick<DirectoryPlaceDetailsRow, "source" | "google_place_id">) {
+  return place.source !== "reps" && !place.google_place_id.startsWith("reps_");
+}
+
 async function fetchPlace(placeId: string): Promise<DirectoryPlaceDetailsRow | null> {
   const { data, error } = await adminSupabase
     .from("medical_directory_places")
     .select(`
       id,
       google_place_id,
+      source,
       display_name,
       formatted_address,
       national_phone,
@@ -269,6 +275,7 @@ async function syncPlaceDetails(place: DirectoryPlaceDetailsRow, google: GoogleP
     .select(`
       id,
       google_place_id,
+      source,
       display_name,
       formatted_address,
       national_phone,
@@ -337,6 +344,22 @@ serve(async (req) => {
     if (!place) {
       return new Response(JSON.stringify({ error: "Lugar no encontrado" }), {
         status: 404,
+        headers: { ...CORS_HEADERS, "Content-Type": "application/json" },
+      });
+    }
+
+    if (!isGoogleBackedPlace(place)) {
+      const favoriteIds = await loadFavoritePlaceIds(authData.user.id, [place.id]);
+      return new Response(JSON.stringify({
+        place: decoratePlace(place, favoriteIds),
+        meta: {
+          cacheStatus: "hit",
+          googleCalled: false,
+          stale: false,
+          warning: "Este resultado viene de REPS. Mostramos la ficha disponible sin refrescar con Google Places.",
+        },
+      }), {
+        status: 200,
         headers: { ...CORS_HEADERS, "Content-Type": "application/json" },
       });
     }

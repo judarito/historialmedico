@@ -49,6 +49,7 @@ export interface MedicalDirectoryPlace {
   place_kind_label?: string;
   badge_labels?: string[];
   is_favorite?: boolean;
+  source?: 'google' | 'google_places' | 'reps' | 'manual';
 }
 
 export interface MedicalDirectorySearchResponse {
@@ -215,6 +216,7 @@ export class MedicalDirectoryService {
         google_maps_uri,
         business_status,
         city_slug,
+        source,
         website_uri,
         current_opening_hours,
         regular_opening_hours,
