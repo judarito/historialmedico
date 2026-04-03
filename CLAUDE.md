@@ -87,7 +87,7 @@ src/app/
 └── (app)/                       # Requiere sesión activa
     ├── _layout.tsx              # Verifica auth, carga tenant
     ├── search.tsx               # Búsqueda global híbrida: fallback local + search-ai + fallback RPC
-    ├── doctor-directory.tsx     # Directorio médico externo: Google Places + cache compartido; soporta acceso directo a guardados y crear visitas desde la búsqueda
+    ├── doctor-directory.tsx     # Directorio médico externo: REPS + Google Places + cache compartido; soporta acceso directo a guardados, badges por fuente y crear visitas desde la búsqueda
     ├── doctor-place/[id].tsx    # Ficha detallada de un lugar médico externo (teléfono/web/horarios on-demand) + CTA para crear visita
     ├── add-visit.tsx            # Formulario nueva visita + botón voz en header; acepta prefill desde directorio médico y selección de familiar si no viene uno fijo
     ├── confirm-scan.tsx         # Revisión y confirmación de fórmula procesada por IA
@@ -150,8 +150,8 @@ src/app/
 |---|---|---|
 | `process-prescription` | `{ document_id }` | OpenAI Vision analiza imagen → extrae meds/exámenes → guarda en `parsed_json` |
 | `search-ai` | `{ query, limit, memberContext? }` | DeepSeek expande términos; en historial puede usar contexto del paciente para afinar la expansión |
-| `search-medical-places` | `{ query, citySlug?, specialtySlug?, latitude?, longitude?, ... }` | Busca especialistas/lugares médicos con Google Places + cache global en Supabase |
-| `get-medical-place-details` | `{ placeId, forceRefresh? }` | Carga teléfono/web/horarios/rating solo al abrir la ficha y los cachea por separado |
+| `search-medical-places` | `{ query, citySlug?, specialtySlug?, latitude?, longitude?, ... }` | Busca especialistas/lugares médicos con REPS como fuente primaria y Google Places como complemento/fallback, usando cache global en Supabase |
+| `get-medical-place-details` | `{ placeId, forceRefresh? }` | Carga teléfono/web/horarios/rating solo al abrir la ficha y los cachea por separado; si el lugar viene de REPS, no intenta refrescar con Google |
 | `infer-visit-diagnosis` | `{ visit, prescriptions, tests }` | Sugiere un diagnóstico breve y prudente desde el detalle de visita usando contexto clínico + medicamentos/exámenes |
 | `voice-to-data` | `{ transcription, context }` | DeepSeek extrae datos estructurados de visita médica (solo si context='visit') |
 | `send-notifications` | — | Cron: envía recordatorios pendientes de medicamentos, examenes y citas |
@@ -242,7 +242,7 @@ src/app/
 
 ## Directorio médico externo
 
-**Objetivo actual:** buscar especialistas/lugares médicos de Colombia usando la API oficial REPS (datos.gov.co) como fuente primaria; Google Places como fallback cuando REPS no devuelve resultados. Cache compartido en Supabase para bajar costo y latencia.
+**Objetivo actual:** buscar especialistas/lugares médicos de Colombia usando la API oficial REPS (datos.gov.co) como fuente primaria; si REPS no aplica, falla o no llena suficientes resultados para la página actual, complementar con Google Places. Cache compartido en Supabase para bajar costo y latencia.
 
 **Piezas nuevas:**
 - Tablas globales `medical_directory_cities` y `medical_directory_specialties` para normalizar intención.
@@ -251,15 +251,15 @@ src/app/
 - Cache de detalle en `medical_directory_places.detail_*` para cargar teléfono/web/horarios solo cuando el usuario abre una ficha.
 - Favoritos por usuario en `medical_directory_favorites`.
 - Métricas básicas en `medical_directory_search_events`.
-- Edge Function `search-medical-places`: primero consulta REPS API → si falla o devuelve 0 → Google Places. Cache REPS: 7 días; Google: 24h.
-- Edge Function `get-medical-place-details` para enriquecer una ficha puntual bajo demanda.
+- Edge Function `search-medical-places`: primero consulta REPS API para búsquedas por ciudad; si REPS falla, no aplica o devuelve menos resultados que `pageSize`, complementa con Google Places y devuelve una lista mezclada con REPS arriba. Cache REPS: 7 días; Google: 24h.
+- Edge Function `get-medical-place-details` para enriquecer una ficha puntual bajo demanda; para resultados `source='reps'` muestra la ficha disponible sin refrescar con Google.
 - La lista ya no usa solo el orden de Google: la Edge Function calcula `local_score`, `place_kind`, `badge_labels` y marca `is_favorite` para priorizar mejor especialista/consultorio/clínica frente a resultados más ruidosos.
 - Inicio (`(tabs)/index.tsx`) muestra un acceso directo con conteo real de guardados; Perfil (`(tabs)/profile.tsx`) también deja abrir el directorio ya filtrado en favoritos **y permite configurar la ciudad preferida**.
 - Tanto `doctor-directory` como `doctor-place/[id]` ya pueden abrir `add-visit` con medico/especialidad/institucion precargados; si el usuario llega sin `memberId`, `add-visit` deja escoger el familiar antes de guardar.
 - En `doctor-directory`, el toggle `Solo favoritos` ya busca localmente sobre `favoritePlaces` usando texto, ciudad y especialidad; no vuelve a Google mientras ese modo está activo.
 - `doctor-directory` carga automáticamente la ciudad preferida del perfil del usuario al abrir.
 
-**REPS API:** `https://www.datos.gov.co/resource/c36g-9fc2.json` — campo ciudad: `municipioprestadordesc` (NO `departamento`). Clave sintética para registros REPS: `google_place_id = reps_${codigoprestador}`. TTL cache: 7 días.
+**REPS API:** `https://www.datos.gov.co/resource/c36g-9fc2.json` — campo ciudad: `municipioprestadordesc` (NO `departamento`). Clave sintética por sede: se prioriza `codigohabilitacionsede`; si falta, cae a `codigoprestador` y luego a un slug del nombre. TTL cache: 7 días.
 
 **Regla de costos:** la búsqueda inicial pide solo campos tipo lista; teléfono/rating quedan como campos opcionales (`includeRichFields`) para no subir el costo por defecto.
 
@@ -357,8 +357,8 @@ UI de resultados
 
 ## Estado real tras cambios recientes
 
-- El directorio médico ahora usa REPS (API oficial colombiana) como fuente primaria y Google Places como fallback. Los registros REPS se guardan con `source='reps'` y clave sintética `google_place_id=reps_${codigoprestador}`.
-- **Fix:** el cache de búsqueda ignoraba REPS si ya existía un cache válido de Google para esa ciudad. Corregido: si `isRepsEligible && !cacheHasRepsData`, se salta el cache hit/stale y se fuerza el refresh path donde se consulta REPS.
+- El directorio médico ahora usa REPS (API oficial colombiana) como fuente primaria y Google Places como complemento/fallback. Los registros REPS se guardan con `source='reps'` y una clave sintética por sede para no colisionar múltiples sedes del mismo prestador.
+- **Fix:** el cache de búsqueda ya no bloquea REPS ni el complemento con Google. Si la búsqueda es elegible para REPS y el cache no tiene resultados REPS o solo tiene un set REPS incompleto sin complemento Google, se salta el hit/stale y se fuerza el refresh path.
 - Los usuarios pueden configurar una ciudad preferida en su perfil; el directorio la precarga automáticamente.
 - Desde el detalle de un miembro es posible generar una tarjeta de emergencia con QR y un link de historial compartido con TTL configurable. Ambas funciones usan `health_share_tokens` + `get_shared_health_summary` (accesible por `anon`).
 - `process-prescription` ya no usa DeepSeek para imágenes. La extracción OCR/visión de fotos está migrada a OpenAI (`gpt-4.1-mini`).
@@ -382,9 +382,13 @@ UI de resultados
 
 ## Cambios de hoy (2026-04-03)
 
-- **Fix REPS bypass cache:** `supabase/functions/search-medical-places/index.ts` — si la ciudad tiene `reps_municipality_name` pero el cache existente solo tiene `source='google'`, se ignora el cache (hit y stale) y se fuerza el refresh path para consultar REPS. Variables `isRepsEligible`, `cacheHasRepsData`, `skipCacheForReps`.
-- **Badge fuente en tarjeta directorio:** `src/app/(app)/doctor-directory.tsx` — cada tarjeta muestra badge verde "REPS" (escudo) o badge azul "Google" (mapa) según `item.source`. Estilos `metaChipReps` y `metaChipGoogle` agregados.
-- **`source` en interfaz cliente:** `src/services/medicalDirectory.ts` — `MedicalDirectoryPlace` ahora incluye `source?: 'google' | 'reps' | 'manual'`.
+- **Búsqueda REPS filtrada:** `supabase/functions/search-medical-places/index.ts` ahora arma un `$where` de Socrata con tokens de la consulta para no traer solo el primer bloque alfabético del municipio.
+- **Clave REPS por sede:** `supabase/functions/search-medical-places/index.ts` dejó de usar solo `codigoprestador`; ahora prioriza `codigohabilitacionsede` para evitar colisiones cuando un prestador tiene varias sedes.
+- **Mix REPS + Google:** `supabase/functions/search-medical-places/index.ts` ahora complementa con Google Places cuando REPS devuelve menos resultados que `pageSize`, guarda la lista combinada en cache y devuelve REPS primero.
+- **Fix cache incompleto:** `supabase/functions/search-medical-places/index.ts` ya no acepta como definitivo un cache REPS fresco pero incompleto si nunca ha sido complementado con Google.
+- **Badge fuente en tarjeta directorio:** `src/app/(app)/doctor-directory.tsx` — cada tarjeta muestra badge verde `REPS` (escudo) o badge azul `Google` (mapa) según `item.source`, incluyendo `google_places`.
+- **`source` en interfaz cliente:** `src/services/medicalDirectory.ts` — `MedicalDirectoryPlace` ahora incluye `source?: 'google' | 'google_places' | 'reps' | 'manual'`.
+- **Detalle REPS seguro:** `supabase/functions/get-medical-place-details/index.ts` no intenta refrescar con Google los lugares que vienen de REPS (`reps_*`).
 
 ## Cambios de hoy (2026-04-01)
 
@@ -396,7 +400,7 @@ UI de resultados
 - **Adherencia mensual:** `src/components/ui/AdherenceCard.tsx` integrado en `member/[id].tsx`.
 - **Gráficos de vitales:** `src/components/ui/VitalsChart.tsx` + `VitalsChartsSection.tsx` integrados en `member/[id].tsx`.
 - **Botones quick actions en detalle de miembro:** se agregaron Emergencia y Compartir; se eliminó el botón Escanear.
-- **Directorio médico — fuente REPS:** `supabase/functions/search-medical-places/index.ts` ahora consulta primero la API oficial REPS (datos.gov.co) para búsquedas por ciudad; cae a Google Places si REPS falla o devuelve 0 resultados. Cache REPS: 7 días.
+- **Directorio médico — fuente REPS:** `supabase/functions/search-medical-places/index.ts` ahora consulta primero la API oficial REPS (datos.gov.co) para búsquedas por ciudad; si REPS falla o devuelve pocos resultados, complementa con Google Places. Cache REPS: 7 días.
 - **Migración 039:** `supabase/migrations/039_preferred_city_and_reps_source.sql` — `profiles.preferred_city_slug`, `medical_directory_cities.reps_municipality_name`, mapeo de 20 ciudades, columnas `source`/`reps_code` en `medical_directory_places`.
 - **Ciudad preferida en perfil:** `src/app/(app)/(tabs)/profile.tsx` — sección "Mi ciudad" con modal picker de ciudades; guarda con RPC `set_preferred_city`.
 - **Auto-preload de ciudad en directorio:** `src/app/(app)/doctor-directory.tsx` — carga silenciosa de ciudad preferida al abrir la pantalla.

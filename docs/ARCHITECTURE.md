@@ -115,6 +115,12 @@ tenant (cuenta/organización)
 
 Esto reduce la dependencia de una sola capa y deja la UX más resiliente cuando una RPC o edge function falla.
 
+### Directorio médico externo (`src/app/(app)/doctor-directory.tsx`)
+- La búsqueda de especialistas usa `search-medical-places` con REPS como fuente primaria para búsquedas por ciudad.
+- Si REPS no aplica, falla o no llena suficientes resultados para la página actual, la edge function complementa con Google Places.
+- El cache compartido vive en `medical_directory_search_cache`; un cache REPS fresco pero incompleto no debe bloquear el complemento con Google.
+- Cada resultado conserva `source` (`reps`, `google_places`, `manual`) para que la UI pueda mostrar badges y para que `get-medical-place-details` evite refrescar con Google un registro REPS.
+
 ---
 
 ## Política de Borrado Implementada

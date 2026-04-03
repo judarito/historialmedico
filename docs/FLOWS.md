@@ -217,40 +217,46 @@ Usuario                    App movil                 PostgreSQL / Supabase
 
 ---
 
-## Flujo 4C: Buscar Especialistas en Colombia (Google Places + Cache)
+## Flujo 4C: Buscar Especialistas en Colombia (REPS + Google Places + Cache)
 
 ```
-Usuario                   App movil               Edge Function                PostgreSQL / Supabase          Google Places
-   |                          |                          |                                 |                          |
-   |-- "pediatra Cartagena"-> |-- invoke search -------> |                                 |                          |
-   |                          |                          |-- normaliza ciudad/especialidad |                          |
-   |                          |                          |-- busca cache_key ------------> |                          |
-   |                          |                          |<-- hit fresco ----------------- |                          |
-   |<-- resultados rapidos ---|                          |                                 |                          |
-   |                          |                          |                                 |                          |
-   |                          |                          |-- miss/stale + lock ----------> |                          |
-   |                          |                          |<-- lock adquirido / no -------- |                          |
-   |                          |                          |-- POST places:searchText ------------------------------------> |
-   |                          |                          |<--------------------------------------------------------------- |
-   |                          |                          |-- upsert lugares / cache -----> |                          |
-   |<-- resultados -----------|                          |                                 |                          |
+Usuario                   App movil               Edge Function                PostgreSQL / Supabase            REPS API               Google Places
+   |                          |                          |                                 |                           |                         |
+   |-- "pediatra Medellin" -> |-- invoke search -------> |                                 |                           |                         |
+   |                          |                          |-- normaliza ciudad/especialidad |                           |                         |
+   |                          |                          |-- busca cache_key ------------> |                           |                         |
+   |                          |                          |<-- hit fresco completo ------- |                           |                         |
+   |<-- resultados rapidos ---|                          |                                 |                           |                         |
+   |                          |                          |                                 |                           |                         |
+   |                          |                          |-- miss/cache incompleto + lock> |                           |                         |
+   |                          |                          |<-- lock adquirido / no -------- |                           |                         |
+   |                          |                          |-- GET datos.gov.co -------------------------------------------> |                         |
+   |                          |                          |<--------------------------------------------------------------- |                         |
+   |                          |                          |-- si REPS no llena pageSize -----------------------------------------------> |
+   |                          |                          |<-------------------------------------------------------------------------------- |
+   |                          |                          |-- mezcla REPS + Google, upsert y cache ----------------------> |                         |
+   |<-- resultados -----------|                          |                                 |                           |                         |
 ```
 
 **Notas actuales:**
 - La Edge Function nueva es `search-medical-places`.
 - La key de Google nunca vive en React Native; solo en secrets de Supabase.
+- REPS es la fuente primaria para búsquedas por ciudad con `reps_municipality_name`; si REPS devuelve menos resultados que `pageSize`, la respuesta se complementa con Google Places.
 - El cache se comparte entre usuarios por `cache_key`, por ejemplo `country:co|mode:city|city:cartagena|specialty:pediatria|page:1`.
 - Las busquedas frescas se sirven desde `medical_directory_search_cache`; si el cache esta vencido pero usable, la app puede recibir resultado `stale`.
-- El lock suave `claim_medical_directory_cache_refresh()` evita que varias busquedas identicas disparen varias llamadas simultaneas a Google.
+- Si una busqueda es elegible para REPS pero el cache solo tiene Google o tiene un set REPS incompleto sin complemento Google, la function ignora ese cache y rehace la mezcla.
+- El lock suave `claim_medical_directory_cache_refresh()` evita que varias busquedas identicas disparen varias llamadas simultaneas a REPS/Google.
 - `medical_directory_cities` y `medical_directory_specialties` quedan expuestas en solo lectura para usuarios autenticados, para usarlas como filtros o sugerencias.
 - El diseño actual esta optimizado para pedir solo campos de lista en Google; telefono/rating quedan como opcion de costo mas alto (`includeRichFields`).
-- Cuando el usuario abre una ficha puntual, la app llama `get-medical-place-details` y usa un cache separado de 7 dias (`detail_*`) para telefono, web y horarios.
+- Los registros REPS se guardan con `source='reps'` y una clave sintética por sede para no colisionar varias sedes del mismo prestador.
+- Cuando el usuario abre una ficha puntual, la app llama `get-medical-place-details` y usa un cache separado de 7 dias (`detail_*`) para telefono, web y horarios; si la ficha viene de REPS, no intenta refrescarla con Google.
 - La pantalla `doctor-place/[id].tsx` es la ficha de detalle y permite llamar, abrir web o abrir Google Maps sin volver a encarecer la lista completa.
-- La lista ahora agrega ranking local (`local_score`) y badges utiles (`Especialista`, `Consultorio`, `Clínica`, `Hospital`, `Favorito`) para mejorar orden y lectura.
+- La lista ahora agrega ranking local (`local_score`) y badges utiles (`Especialista`, `Consultorio`, `Clínica`, `Hospital`, `Favorito`, `REPS`, `Google`) para mejorar orden y lectura.
 - Los favoritos viven en `medical_directory_favorites`; se pueden marcar desde la lista o la ficha y luego filtrar con `Solo favoritos`.
 - `medical_directory_places` y `medical_directory_place_specialties` deben estar expuestas en lectura a usuarios autenticados; si no, el contador de guardados puede subir pero la lista aparecer vacia.
 - Inicio y Perfil ya pueden abrir `doctor-directory` directamente en modo guardados (`?favorites=1`) para no depender de una busqueda previa.
 - Desde la lista o la ficha del directorio ya se puede tocar `Crear visita`; eso abre `add-visit` con medico/especialidad/institucion precargados, y si no venia un familiar fijo permite escogerlo antes de guardar.
+- `doctor-directory` precarga la ciudad preferida del perfil del usuario usando `get_preferred_city`.
 - Cuando `Solo favoritos` está activo, la busqueda se resuelve localmente sobre los guardados del usuario y no dispara Google Places.
 
 ---
