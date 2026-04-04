@@ -19,6 +19,7 @@ import { useAuthStore } from '../../../store/authStore';
 import { useFamilyStore } from '../../../store/familyStore';
 import { Avatar } from '../../../components/ui/Avatar';
 import { supabase } from '../../../services/supabase';
+import { sendWhatsAppTestToMyPhone } from '../../../services/twilioMessaging';
 import type { Database, TenantInvitationStatus, TenantUserRole } from '../../../types/database.types';
 import { Colors, Typography, Spacing, Radius } from '../../../theme';
 import { getTenantPlanLabel } from '../../../constants/tenantPlans';
@@ -144,6 +145,11 @@ export default function ProfileTab() {
   const [cities, setCities] = useState<{ slug: string; name: string }[]>([]);
   const [savingCity, setSavingCity] = useState(false);
   const [showCityPicker, setShowCityPicker] = useState(false);
+  const [phone, setPhone] = useState('');
+  const [savedPhone, setSavedPhone] = useState('');
+  const [loadingPhone, setLoadingPhone] = useState(false);
+  const [savingPhone, setSavingPhone] = useState(false);
+  const [testingWhatsApp, setTestingWhatsApp] = useState(false);
 
   const fullName = user?.user_metadata?.full_name ?? user?.email?.split('@')[0] ?? 'Usuario';
   const email = user?.email ?? '';
@@ -189,6 +195,32 @@ export default function ProfileTab() {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     if (cityData && (cityData as any[]).length > 0) setPreferredCity((cityData as any[])[0]);
   }, []);
+
+  const loadProfileContact = useCallback(async () => {
+    if (!user?.id) {
+      setPhone('');
+      setSavedPhone('');
+      setLoadingPhone(false);
+      return;
+    }
+
+    setLoadingPhone(true);
+    const { data, error } = await supabase
+      .from('profiles')
+      .select('phone')
+      .eq('id', user.id)
+      .maybeSingle();
+
+    setLoadingPhone(false);
+
+    if (error) {
+      return;
+    }
+
+    const nextPhone = data?.phone ?? '';
+    setPhone(nextPhone);
+    setSavedPhone(nextPhone);
+  }, [user?.id]);
 
   async function loadAccessData() {
     if (!tenant?.id) {
@@ -236,12 +268,14 @@ export default function ProfileTab() {
   useEffect(() => {
     void loadDirectorySummary();
     void loadCityPreferences();
-  }, [loadDirectorySummary, loadCityPreferences]);
+    void loadProfileContact();
+  }, [loadDirectorySummary, loadCityPreferences, loadProfileContact]);
 
   useFocusEffect(useCallback(() => {
     void loadDirectorySummary();
     void loadCityPreferences();
-  }, [loadDirectorySummary, loadCityPreferences]));
+    void loadProfileContact();
+  }, [loadDirectorySummary, loadCityPreferences, loadProfileContact]));
 
   useEffect(() => {
     if (assignableRoles.length === 0) return;
@@ -399,6 +433,57 @@ export default function ProfileTab() {
     setShowCityPicker(false);
   }
 
+  async function handleSavePhone() {
+    if (!user?.id) return;
+
+    const normalized = phone.trim();
+    if (normalized === savedPhone) {
+      return;
+    }
+
+    setSavingPhone(true);
+    const { error } = await supabase
+      .from('profiles')
+      .update({ phone: normalized || null })
+      .eq('id', user.id);
+    setSavingPhone(false);
+
+    if (error) {
+      Alert.alert('No pudimos guardar el número', error.message);
+      return;
+    }
+
+    setSavedPhone(normalized);
+    Alert.alert('Número guardado', normalized
+      ? 'Lo usaremos para pruebas y futuros recordatorios por WhatsApp/SMS.'
+      : 'Quitamos el número de contacto de tu perfil.');
+  }
+
+  async function handleSendWhatsAppTest() {
+    if (!phone.trim()) {
+      Alert.alert('Número requerido', 'Primero guarda tu número con formato internacional, por ejemplo +573001112233.');
+      return;
+    }
+
+    setTestingWhatsApp(true);
+    try {
+      const result = await sendWhatsAppTestToMyPhone();
+      Alert.alert(
+        'Prueba enviada',
+        result.sandbox
+          ? 'Twilio aceptó el envío. Si usas Sandbox, confirma que tu número ya se unió al sandbox de WhatsApp.'
+          : 'Twilio aceptó el envío del mensaje de prueba.',
+      );
+    } catch (error) {
+      Alert.alert(
+        'No pudimos enviar la prueba',
+        error instanceof Error ? error.message : 'Error desconocido',
+      );
+    } finally {
+      setTestingWhatsApp(false);
+    }
+  }
+
   async function handleSignOut() {
     Alert.alert('Cerrar sesión', '¿Estás seguro de que quieres salir?', [
       { text: 'Cancelar', style: 'cancel' },
@@ -439,6 +524,76 @@ export default function ProfileTab() {
             )}
           </Section>
         )}
+
+        <Section title="WhatsApp y SMS">
+          <View style={styles.messagingBlock}>
+            <Text style={styles.sectionBodyText}>
+              Guarda el número donde quieres recibir pruebas y, más adelante, recordatorios externos. Usa formato internacional, por ejemplo +573001112233.
+            </Text>
+
+            <View style={styles.inputWrap}>
+              <Ionicons
+                name="logo-whatsapp"
+                size={18}
+                color={Colors.textSecondary}
+                style={styles.inputIcon}
+              />
+              <TextInput
+                style={styles.input}
+                placeholder="+57 300 111 2233"
+                placeholderTextColor={Colors.textMuted}
+                value={phone}
+                onChangeText={setPhone}
+                keyboardType="phone-pad"
+                autoCapitalize="none"
+                autoCorrect={false}
+                editable={!savingPhone && !testingWhatsApp && !loadingPhone}
+              />
+            </View>
+
+            <View style={styles.messagingActions}>
+              <TouchableOpacity
+                style={[
+                  styles.inviteBtn,
+                  styles.messagingPrimaryBtn,
+                  (savingPhone || testingWhatsApp || phone.trim() === savedPhone) && styles.inviteBtnDisabled,
+                ]}
+                onPress={handleSavePhone}
+                disabled={savingPhone || testingWhatsApp || phone.trim() === savedPhone}
+                activeOpacity={0.8}
+              >
+                {savingPhone
+                  ? <ActivityIndicator color={Colors.white} size="small" />
+                  : (
+                    <>
+                      <Ionicons name="save-outline" size={18} color={Colors.white} />
+                      <Text style={styles.inviteBtnText}>Guardar número</Text>
+                    </>
+                  )}
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[
+                  styles.messagingSecondaryBtn,
+                  (testingWhatsApp || savingPhone || !phone.trim()) && styles.actionChipDisabled,
+                ]}
+                onPress={handleSendWhatsAppTest}
+                disabled={testingWhatsApp || savingPhone || !phone.trim()}
+                activeOpacity={0.8}
+              >
+                {testingWhatsApp
+                  ? <ActivityIndicator color={Colors.primary} size="small" />
+                  : <Ionicons name="paper-plane-outline" size={18} color={Colors.primary} />
+                }
+                <Text style={styles.messagingSecondaryBtnText}>Enviar prueba por WhatsApp</Text>
+              </TouchableOpacity>
+            </View>
+
+            <Text style={styles.messagingHint}>
+              Si Twilio sigue en Sandbox, ese mismo número debe haberse unido antes al sandbox de WhatsApp.
+            </Text>
+          </View>
+        </Section>
 
         {tenant && (
           <Section title="Acceso compartido">
@@ -948,6 +1103,11 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: Colors.border,
   },
+  messagingBlock: {
+    gap: Spacing.sm,
+    paddingHorizontal: Spacing.base,
+    paddingVertical: Spacing.base,
+  },
   inviteTitle: {
     color: Colors.textPrimary,
     fontSize: Typography.base,
@@ -1018,6 +1178,34 @@ const styles = StyleSheet.create({
     color: Colors.white,
     fontSize: Typography.base,
     fontWeight: Typography.bold,
+  },
+  messagingActions: {
+    gap: Spacing.sm,
+  },
+  messagingPrimaryBtn: {
+    marginTop: 4,
+  },
+  messagingSecondaryBtn: {
+    minHeight: 48,
+    borderRadius: Radius.lg,
+    borderWidth: 1,
+    borderColor: Colors.primary + '44',
+    backgroundColor: Colors.primary + '12',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexDirection: 'row',
+    gap: Spacing.sm,
+    paddingHorizontal: Spacing.base,
+  },
+  messagingSecondaryBtnText: {
+    color: Colors.primary,
+    fontSize: Typography.base,
+    fontWeight: Typography.semibold,
+  },
+  messagingHint: {
+    color: Colors.textMuted,
+    fontSize: Typography.xs,
+    lineHeight: 18,
   },
   accessNotice: {
     flexDirection: 'row',

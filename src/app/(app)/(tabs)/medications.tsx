@@ -30,6 +30,9 @@ export default function MedicationsTab() {
   const [selectedMember, setSelectedMember] = useState<string | null>(null);
   const [preferredMemberId, setPreferredMemberId] = useState<string | null>(memberId ?? null);
   const selectedMemberRef = useRef<string | null>(null);
+  const inFlightMemberLoadRef = useRef<string | null>(null);
+  const lastMemberLoadRef = useRef<{ memberId: string | null; at: number }>({ memberId: null, at: 0 });
+  const lastFocusRefreshRef = useRef<{ memberId: string | null; at: number }>({ memberId: null, at: 0 });
   const [expiringMeds, setExpiringMeds] = useState<{ medication_name: string; end_at: string }[]>([]);
 
   useEffect(() => {
@@ -41,13 +44,55 @@ export default function MedicationsTab() {
   }, [memberId]);
 
   const ensureMembersLoaded = useCallback(async (forceRefresh = false) => {
-    let currentMembers = members;
+    let currentMembers = useFamilyStore.getState().members;
     if (family?.id && (forceRefresh || currentMembers.length === 0)) {
       await fetchMembers();
       currentMembers = useFamilyStore.getState().members;
     }
     return currentMembers;
-  }, [family?.id, members, fetchMembers]);
+  }, [family?.id, fetchMembers]);
+
+  const loadMemberData = useCallback(async (memberIdToLoad: string, options?: { force?: boolean }) => {
+    const now = Date.now();
+    const lastLoad = lastMemberLoadRef.current;
+
+    if (inFlightMemberLoadRef.current === memberIdToLoad) {
+      return;
+    }
+
+    if (
+      !options?.force
+      && lastLoad.memberId === memberIdToLoad
+      && now - lastLoad.at < 1500
+    ) {
+      return;
+    }
+
+    inFlightMemberLoadRef.current = memberIdToLoad;
+    lastMemberLoadRef.current = { memberId: memberIdToLoad, at: now };
+
+    try {
+      await fetchTodayDoses(memberIdToLoad);
+
+      const sevenDays = new Date(Date.now() + 7 * 86400000).toISOString();
+      const { data } = await supabase
+        .from('prescriptions')
+        .select('medication_name, end_at')
+        .eq('family_member_id', memberIdToLoad)
+        .eq('status', 'active')
+        .not('end_at', 'is', null)
+        .lte('end_at', sevenDays)
+        .order('end_at', { ascending: true });
+
+      if (selectedMemberRef.current === memberIdToLoad) {
+        setExpiringMeds(data ?? []);
+      }
+    } finally {
+      if (inFlightMemberLoadRef.current === memberIdToLoad) {
+        inFlightMemberLoadRef.current = null;
+      }
+    }
+  }, [fetchTodayDoses]);
 
   useEffect(() => {
     let cancelled = false;
@@ -58,6 +103,7 @@ export default function MedicationsTab() {
 
       if (currentMembers.length === 0) {
         setSelectedMember(null);
+        setExpiringMeds([]);
         return;
       }
 
@@ -79,30 +125,24 @@ export default function MedicationsTab() {
   }, [ensureMembersLoaded, preferredMemberId]);
 
   useEffect(() => {
-    if (!selectedMember) return;
-    void fetchTodayDoses(selectedMember);
-    // Cargar medicamentos por vencer (≤7 días)
-    const sevenDays = new Date(Date.now() + 7 * 86400000).toISOString();
-    void supabase
-      .from('prescriptions')
-      .select('medication_name, end_at')
-      .eq('family_member_id', selectedMember)
-      .eq('status', 'active')
-      .not('end_at', 'is', null)
-      .lte('end_at', sevenDays)
-      .order('end_at', { ascending: true })
-      .then(({ data }) => setExpiringMeds(data ?? []));
-  }, [selectedMember, fetchTodayDoses]);
+    if (!selectedMember) {
+      setExpiringMeds([]);
+      return;
+    }
+
+    void loadMemberData(selectedMember);
+  }, [loadMemberData, selectedMember]);
 
   useFocusEffect(useCallback(() => {
     let cancelled = false;
 
     async function refreshOnFocus() {
-      const currentMembers = await ensureMembersLoaded(true);
+      const currentMembers = await ensureMembersLoaded();
       if (cancelled) return;
 
       if (currentMembers.length === 0) {
         setSelectedMember(null);
+        setExpiringMeds([]);
         return;
       }
 
@@ -119,14 +159,24 @@ export default function MedicationsTab() {
         return;
       }
 
-      void fetchTodayDoses(nextMemberId);
+      const now = Date.now();
+      const lastFocusRefresh = lastFocusRefreshRef.current;
+      if (
+        lastFocusRefresh.memberId === nextMemberId
+        && now - lastFocusRefresh.at < 2000
+      ) {
+        return;
+      }
+
+      lastFocusRefreshRef.current = { memberId: nextMemberId, at: now };
+      void loadMemberData(nextMemberId, { force: true });
     }
 
     void refreshOnFocus();
     return () => {
       cancelled = true;
     };
-  }, [ensureMembersLoaded, preferredMemberId, fetchTodayDoses]));
+  }, [ensureMembersLoaded, preferredMemberId, loadMemberData]));
 
   function selectMember(id: string) {
     setPreferredMemberId(null);

@@ -15,6 +15,11 @@ import {
 import { router } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { supabase } from '../../services/supabase';
+import {
+  askHealthAgent,
+  looksLikeHealthAgentQuestion,
+  type HealthAgentResponse,
+} from '../../services/healthAgent';
 import { searchGlobalFallback } from '../../services/searchFallback';
 import { Colors, Typography, Spacing, Radius } from '../../theme';
 import { VoiceRecordButton } from '../../components/ui/VoiceRecordButton';
@@ -103,11 +108,15 @@ export default function SearchScreen() {
   const [filter,       setFilter]       = useState<FilterCategory>('all');
   const [results,      setResults]      = useState<SearchResult[]>([]);
   const [expansion,    setExpansion]    = useState<AIExpansion | null>(null);
+  const [agentResponse, setAgentResponse] = useState<HealthAgentResponse | null>(null);
+  const [agentLoading,  setAgentLoading]  = useState(false);
+  const [agentError,    setAgentError]    = useState<string | null>(null);
   const [loading,      setLoading]      = useState(false);
   const [searched,     setSearched]     = useState(false);
   const [searchError,  setSearchError]  = useState<string | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const inputRef    = useRef<TextInput>(null);
+  const searchRunRef = useRef(0);
 
   function handleQueryChange(text: string) {
     setQuery(text);
@@ -115,7 +124,10 @@ export default function SearchScreen() {
 
     if (!text.trim()) {
       setResults([]); setExpansion(null); setSearchError(null);
+      setAgentResponse(null); setAgentError(null); setAgentLoading(false);
+      setFilter('all');
       setSearched(false); setLoading(false);
+      searchRunRef.current += 1;
       return;
     }
 
@@ -123,11 +135,38 @@ export default function SearchScreen() {
     debounceRef.current = setTimeout(() => runSearch(text.trim()), 500);
   }
 
+  async function loadAgentAnswer(q: string, runId: number) {
+    try {
+      const response = await askHealthAgent(q);
+      if (runId !== searchRunRef.current) return;
+      setAgentResponse(response);
+      setAgentError(null);
+    } catch (error) {
+      if (runId !== searchRunRef.current) return;
+      setAgentResponse(null);
+      setAgentError(error instanceof Error ? error.message : 'No se pudo obtener la respuesta del asistente.');
+    } finally {
+      if (runId === searchRunRef.current) {
+        setAgentLoading(false);
+      }
+    }
+  }
+
   async function runSearch(q: string) {
+    const runId = ++searchRunRef.current;
+    const shouldUseAgent = looksLikeHealthAgentQuestion(q);
     setSearchError(null);
+    setAgentResponse(null);
+    setAgentError(null);
+    setAgentLoading(shouldUseAgent);
+
+    if (shouldUseAgent) {
+      void loadAgentAnswer(q, runId);
+    }
 
     try {
       const fallbackResults = await searchGlobalFallback(q, 40);
+      if (runId !== searchRunRef.current) return;
       if (fallbackResults.length > 0) {
         setLoading(false);
         setSearched(true);
@@ -144,6 +183,7 @@ export default function SearchScreen() {
     const { data, error: fnError } = await supabase.functions.invoke('search-ai', {
       body: { query: q, limit: 40 },
     });
+    if (runId !== searchRunRef.current) return;
 
     if (!fnError && data?.results) {
       setLoading(false);
@@ -170,6 +210,7 @@ export default function SearchScreen() {
       p_query: q,
       p_limit: 40,
     });
+    if (runId !== searchRunRef.current) return;
 
     setLoading(false);
     setSearched(true);
@@ -204,6 +245,10 @@ export default function SearchScreen() {
     } else {
       router.push({ pathname: '/(app)/member/[id]', params: { id: item.member_id } });
     }
+  }
+
+  function handleVisitPress(visitId: string) {
+    router.push({ pathname: '/(app)/visit/[id]', params: { id: visitId } });
   }
 
   // Aplicar filtro activo
@@ -297,7 +342,19 @@ export default function SearchScreen() {
               ? <ActivityIndicator size="small" color={Colors.primary} />
               : !!query
                 ? (
-                  <TouchableOpacity onPress={() => { setQuery(''); setResults([]); setSearched(false); setExpansion(null); }}>
+                  <TouchableOpacity onPress={() => {
+                    searchRunRef.current += 1;
+                    setQuery('');
+                    setFilter('all');
+                    setLoading(false);
+                    setResults([]);
+                    setSearched(false);
+                    setExpansion(null);
+                    setAgentResponse(null);
+                    setAgentError(null);
+                    setAgentLoading(false);
+                    setSearchError(null);
+                  }}>
                     <Ionicons name="close-circle" size={18} color={Colors.textMuted} />
                   </TouchableOpacity>
                 )
@@ -329,6 +386,84 @@ export default function SearchScreen() {
                   </TouchableOpacity>
                 ))}
               </ScrollView>
+            )}
+          </View>
+        )}
+
+        {(agentLoading || agentResponse || agentError) && (
+          <View style={styles.agentCard}>
+            <View style={styles.agentCardHeader}>
+              <View style={styles.agentCardTitleWrap}>
+                <View style={styles.agentIconBadge}>
+                  {agentLoading
+                    ? <ActivityIndicator size="small" color={Colors.primary} />
+                    : <Ionicons name="sparkles" size={16} color={Colors.primary} />
+                  }
+                </View>
+                <View style={styles.agentCardCopy}>
+                  <Text style={styles.agentCardTitle}>Asistente del historial médico</Text>
+                  <Text style={styles.agentCardSubtitle}>
+                    {agentLoading
+                      ? 'Revisando visitas, medicamentos, exámenes y documentos...'
+                      : agentResponse?.family_member
+                        ? `Familiar detectado: ${agentResponse.family_member.name}`
+                        : 'Respuesta basada en la información real guardada en la app'}
+                  </Text>
+                </View>
+              </View>
+
+              {!!agentResponse && (
+                <View style={styles.agentConfidenceBadge}>
+                  <Text style={styles.agentConfidenceText}>
+                    {Math.round((agentResponse.confidence ?? 0) * 100)}%
+                  </Text>
+                </View>
+              )}
+            </View>
+
+            {!!agentError && (
+              <View style={styles.agentWarningBox}>
+                <Ionicons name="warning-outline" size={14} color={Colors.warning} />
+                <Text style={styles.agentWarningText}>{agentError}</Text>
+              </View>
+            )}
+
+            {!!agentResponse?.answer && (
+              <Text style={styles.agentAnswer}>{agentResponse.answer}</Text>
+            )}
+
+            {(agentResponse?.warnings?.length ?? 0) > 0 && (
+              <View style={styles.agentWarningsList}>
+                {agentResponse!.warnings.map((warning) => (
+                  <View key={warning} style={styles.agentWarningRow}>
+                    <Ionicons name="alert-circle-outline" size={13} color={Colors.warning} />
+                    <Text style={styles.agentWarningText}>{warning}</Text>
+                  </View>
+                ))}
+              </View>
+            )}
+
+            {(agentResponse?.matched_visits?.length ?? 0) > 0 && (
+              <View style={styles.relatedVisitsSection}>
+                <Text style={styles.relatedVisitsTitle}>Visitas relacionadas</Text>
+                {agentResponse!.matched_visits.map((visit) => (
+                  <TouchableOpacity
+                    key={visit.visit_id}
+                    style={styles.relatedVisitCard}
+                    activeOpacity={0.8}
+                    onPress={() => handleVisitPress(visit.visit_id)}
+                  >
+                    <View style={styles.relatedVisitIcon}>
+                      <Ionicons name="calendar-outline" size={16} color={Colors.info} />
+                    </View>
+                    <View style={styles.relatedVisitBody}>
+                      <Text style={styles.relatedVisitTitle} numberOfLines={1}>{visit.title}</Text>
+                      <Text style={styles.relatedVisitReason} numberOfLines={1}>{visit.reason}</Text>
+                    </View>
+                    <Text style={styles.relatedVisitDate}>{formatDate(visit.visit_date)}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
             )}
           </View>
         )}
@@ -393,19 +528,29 @@ export default function SearchScreen() {
             </TouchableOpacity>
           </View>
         ) : filtered.length === 0 ? (
-          <View style={styles.stateCenter}>
-            <Ionicons name="file-tray-outline" size={48} color={Colors.textMuted} />
-            <Text style={styles.stateTitle}>Sin resultados</Text>
-            <Text style={styles.stateText}>
-              No se encontró nada para "{query}"
-              {filter !== 'all' ? ` en "${FILTER_CHIPS.find(c => c.key === filter)?.label}"` : ''}.
-            </Text>
-            {filter !== 'all' && (
-              <TouchableOpacity onPress={() => setFilter('all')} style={styles.clearFilterBtn}>
-                <Text style={styles.clearFilterText}>Ver todos los resultados</Text>
-              </TouchableOpacity>
-            )}
-          </View>
+          agentResponse ? (
+            <View style={styles.stateCenter}>
+              <Ionicons name="layers-outline" size={48} color={Colors.textMuted} />
+              <Text style={styles.stateTitle}>Sin resultados clásicos adicionales</Text>
+              <Text style={styles.stateText}>
+                La respuesta del asistente aparece arriba. No encontré más coincidencias navegables para esta consulta.
+              </Text>
+            </View>
+          ) : (
+            <View style={styles.stateCenter}>
+              <Ionicons name="file-tray-outline" size={48} color={Colors.textMuted} />
+              <Text style={styles.stateTitle}>Sin resultados</Text>
+              <Text style={styles.stateText}>
+                No se encontró nada para "{query}"
+                {filter !== 'all' ? ` en "${FILTER_CHIPS.find(c => c.key === filter)?.label}"` : ''}.
+              </Text>
+              {filter !== 'all' && (
+                <TouchableOpacity onPress={() => setFilter('all')} style={styles.clearFilterBtn}>
+                  <Text style={styles.clearFilterText}>Ver todos los resultados</Text>
+                </TouchableOpacity>
+              )}
+            </View>
+          )
         ) : (
           <FlatList
             data={filtered}
@@ -458,6 +603,124 @@ const styles = StyleSheet.create({
     paddingHorizontal: Spacing.sm, paddingVertical: 3, marginLeft: Spacing.xs,
   },
   aiTermText: { color: Colors.primary, fontSize: Typography.xs, fontWeight: Typography.medium },
+  agentCard: {
+    marginHorizontal: Spacing.base,
+    marginTop: Spacing.sm,
+    padding: Spacing.md,
+    borderRadius: Radius.lg,
+    borderWidth: 1,
+    borderColor: Colors.primary + '26',
+    backgroundColor: Colors.surface,
+    gap: Spacing.md,
+  },
+  agentCardHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: Spacing.sm,
+  },
+  agentCardTitleWrap: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.sm,
+    flex: 1,
+  },
+  agentIconBadge: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: Colors.primary + '15',
+  },
+  agentCardCopy: { flex: 1, gap: 2 },
+  agentCardTitle: {
+    color: Colors.textPrimary,
+    fontSize: Typography.sm,
+    fontWeight: Typography.semibold,
+  },
+  agentCardSubtitle: {
+    color: Colors.textSecondary,
+    fontSize: Typography.xs,
+    lineHeight: 18,
+  },
+  agentConfidenceBadge: {
+    paddingHorizontal: Spacing.sm,
+    paddingVertical: 4,
+    borderRadius: Radius.full,
+    backgroundColor: Colors.primary + '18',
+  },
+  agentConfidenceText: {
+    color: Colors.primary,
+    fontSize: Typography.xs,
+    fontWeight: Typography.bold,
+  },
+  agentAnswer: {
+    color: Colors.textPrimary,
+    fontSize: Typography.sm,
+    lineHeight: 22,
+  },
+  agentWarningsList: { gap: Spacing.xs },
+  agentWarningBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.xs,
+    borderRadius: Radius.md,
+    borderWidth: 1,
+    borderColor: Colors.warning + '22',
+    backgroundColor: Colors.warningBg,
+    paddingHorizontal: Spacing.sm,
+    paddingVertical: Spacing.sm,
+  },
+  agentWarningRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: Spacing.xs,
+  },
+  agentWarningText: {
+    color: Colors.textSecondary,
+    fontSize: Typography.xs,
+    lineHeight: 18,
+    flex: 1,
+  },
+  relatedVisitsSection: { gap: Spacing.sm },
+  relatedVisitsTitle: {
+    color: Colors.textPrimary,
+    fontSize: Typography.sm,
+    fontWeight: Typography.semibold,
+  },
+  relatedVisitCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.sm,
+    padding: Spacing.sm,
+    borderRadius: Radius.md,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    backgroundColor: Colors.background,
+  },
+  relatedVisitIcon: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: Colors.infoBg,
+  },
+  relatedVisitBody: { flex: 1, gap: 2 },
+  relatedVisitTitle: {
+    color: Colors.textPrimary,
+    fontSize: Typography.sm,
+    fontWeight: Typography.medium,
+  },
+  relatedVisitReason: {
+    color: Colors.textSecondary,
+    fontSize: Typography.xs,
+  },
+  relatedVisitDate: {
+    color: Colors.textMuted,
+    fontSize: Typography.xs,
+  },
   directoryCta: {
     flexDirection: 'row',
     alignItems: 'center',
