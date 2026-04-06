@@ -99,6 +99,12 @@ tenant (cuenta/organización)
 6. Todas las queries filtran por tenant_id automáticamente via RLS
 ```
 
+### Resolución de onboarding actual
+- Si el usuario no tiene tenant/familia activa, entra a `onboarding/index`.
+- Si ya tiene familia pero todavía no existe el primer miembro, entra a `onboarding/member`.
+- Si ya tiene familia y miembros pero `profiles.phone` está vacío, entra a `onboarding/contact`.
+- Solo cuando tenant, familia, primer miembro y celular existen, la app entra a `/(app)/(tabs)`.
+
 ---
 
 ## Búsqueda Híbrida
@@ -107,6 +113,10 @@ tenant (cuenta/organización)
 - Primer intento: `searchGlobalFallback()` en cliente
 - Si no hay resultados: `search-ai`
 - Si la edge function falla: `search_global`
+- El agente RAG del historial ya no se dispara automáticamente mientras el usuario escribe.
+- La pantalla separa dos carriles: búsqueda general reactiva y consulta explícita al asistente.
+- `looksLikeHealthAgentQuestion()` ahora solo se usa como sugerencia de UI para mostrar la CTA `Preguntar al asistente`.
+- La respuesta del asistente y los resultados navegables mantienen estados de carga/cancelación independientes.
 
 ### Búsqueda en historial (`src/app/(app)/history.tsx`)
 - Primer intento: `searchMemberHistoryLocal()` con datos ya cargados del miembro
@@ -120,6 +130,13 @@ Esto reduce la dependencia de una sola capa y deja la UX más resiliente cuando 
 - Si REPS no aplica, falla o no llena suficientes resultados para la página actual, la edge function complementa con Google Places.
 - El cache compartido vive en `medical_directory_search_cache`; un cache REPS fresco pero incompleto no debe bloquear el complemento con Google.
 - Cada resultado conserva `source` (`reps`, `google_places`, `manual`) para que la UI pueda mostrar badges y para que `get-medical-place-details` evite refrescar con Google un registro REPS.
+
+### Mensajería externa (`send-twilio-message`)
+- El número destino de pruebas WhatsApp/SMS se toma de `profiles.phone` del usuario autenticado.
+- El onboarding ahora exige capturar ese celular antes de dejar pasar a la app principal.
+- La Edge Function devuelve tanto el `status` inicial de Twilio como un `deliveryStatus` consultado segundos después del envío.
+- Si el canal sigue en sandbox (`TWILIO_WHATSAPP_FROM=whatsapp:+14155238886`), el número debe haberse unido al sandbox de Twilio.
+- Para iniciar conversaciones por WhatsApp fuera de la ventana de 24 horas, se requiere una plantilla con `ContentSid` (`HX...`) aprobada para `WhatsApp business initiated`; un `body` libre produce `63016`.
 
 ---
 

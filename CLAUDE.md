@@ -65,6 +65,10 @@ EXPO_PUBLIC_PROJECT_ID=d2e708b8-fceb-4239-8a1d-df5ce8d3d5d2
 - `DEEPSEEK_API_KEY`
 - `OPENAI_API_KEY`
 - `GOOGLE_MAPS_API_KEY`
+- `TWILIO_ACCOUNT_SID`
+- `TWILIO_AUTH_TOKEN`
+- `TWILIO_WHATSAPP_FROM`
+- `TWILIO_DEFAULT_WHATSAPP_CONTENT_SID`
 
 ---
 
@@ -82,11 +86,12 @@ src/app/
 │
 ├── onboarding/
 │   ├── index.tsx                # Crear familia + seleccionar plan inicial del tenant
-│   └── member.tsx               # Agregar primer miembro familiar
+│   ├── member.tsx               # Agregar primer miembro familiar
+│   └── contact.tsx              # Capturar celular del usuario (profiles.phone) antes de entrar a la app
 │
 └── (app)/                       # Requiere sesión activa
     ├── _layout.tsx              # Verifica auth, carga tenant
-    ├── search.tsx               # Búsqueda global híbrida: fallback local + search-ai + fallback RPC
+    ├── search.tsx               # Búsqueda global híbrida: fallback local + search-ai + fallback RPC; el agente del historial se ejecuta solo por CTA explícita
     ├── doctor-directory.tsx     # Directorio médico externo: REPS + Google Places + cache compartido; soporta acceso directo a guardados, badges por fuente y crear visitas desde la búsqueda
     ├── doctor-place/[id].tsx    # Ficha detallada de un lugar médico externo (teléfono/web/horarios on-demand) + CTA para crear visita
     ├── add-visit.tsx            # Formulario nueva visita + botón voz en header; acepta prefill desde directorio médico y selección de familiar si no viene uno fijo
@@ -336,6 +341,19 @@ UI de resultados
 ```
 
 ```
+search.tsx (asistente del historial)
+Usuario escribe una pregunta
+        ↓
+looksLikeHealthAgentQuestion() solo sugiere CTA
+        ↓
+Usuario toca "Preguntar al asistente"
+        ↓
+ask-health-agent
+        ↓
+UI de respuesta del agente
+```
+
+```
 history.tsx (historial por miembro)
 Usuario escribe query
         ↓
@@ -370,7 +388,12 @@ UI de resultados
 - En `visit/[id].tsx` ya existe preview del archivo original de imagen o audio usando signed URLs.
 - `confirm-scan.tsx` ahora puede mostrar el error real del procesamiento y dejar continuar en modo manual aunque la IA no haya extraído datos.
 - La búsqueda del home ya tiene fallback local en cliente para no depender únicamente de `search-ai` / `search_global`.
+- La búsqueda global del home y el agente del historial ya no comparten el mismo disparo automático; la búsqueda sigue reactiva, pero el agente se ejecuta solo cuando el usuario toca la CTA.
 - La búsqueda del historial ya tiene fallback local usando `visits`, `prescriptions` y `medical_tests` cargados del miembro antes de llamar RPCs o IA.
+- El onboarding ahora incluye `onboarding/contact` para capturar `profiles.phone` cuando todavía falta; esto bloquea la entrada a tabs hasta que el usuario guarde su celular.
+- Las pruebas de WhatsApp usan `profiles.phone` del usuario autenticado como destinatario.
+- `send-twilio-message` ya no se limita a responder que Twilio aceptó el request: también consulta el estado posterior del SID y devuelve `deliveryStatus`, `errorCode` y `errorMessage`.
+- Si WhatsApp devuelve `63016`, normalmente significa que se intentó iniciar conversación fuera de la ventana de 24 horas sin una plantilla válida (`ContentSid` `HX...`) aprobada para `WhatsApp business initiated`.
 - Las notas de voz antiguas pueden no tener audio original reproducible porque antes solo se guardaba la transcripción.
 - `medical_visits.voice_note_url` existe en schema/migraciones, pero el flujo actual consulta el audio original desde `medical_documents.file_path` del adjunto `voice_note`.
 - Sigue abierta una incidencia de runtime: en algunos intentos `process-prescription` responde `401 Invalid JWT` aun usando `supabase.functions.invoke()` + `refreshSession()`. Si reaparece, revisar sesión del dispositivo y la configuración auth/JWT de la función en Supabase.
@@ -389,6 +412,13 @@ UI de resultados
 - **Badge fuente en tarjeta directorio:** `src/app/(app)/doctor-directory.tsx` — cada tarjeta muestra badge verde `REPS` (escudo) o badge azul `Google` (mapa) según `item.source`, incluyendo `google_places`.
 - **`source` en interfaz cliente:** `src/services/medicalDirectory.ts` — `MedicalDirectoryPlace` ahora incluye `source?: 'google' | 'google_places' | 'reps' | 'manual'`.
 - **Detalle REPS seguro:** `supabase/functions/get-medical-place-details/index.ts` no intenta refrescar con Google los lugares que vienen de REPS (`reps_*`).
+
+## Cambios de hoy (2026-04-05)
+
+- **Búsqueda desacoplada:** `src/app/(app)/search.tsx` ya no dispara `ask-health-agent` por cada caracter. La búsqueda general sigue con debounce y el asistente del historial aparece como CTA explícita.
+- **Onboarding de celular:** `src/app/onboarding/contact.tsx` nuevo paso para guardar `profiles.phone`; `src/utils/authRouting.ts`, `src/app/onboarding/index.tsx` y `src/app/onboarding/member.tsx` ahora lo exigen antes de entrar a tabs.
+- **Twilio / WhatsApp:** `supabase/functions/send-twilio-message/index.ts` ahora consulta el estado posterior del mensaje en Twilio y devuelve `deliveryStatus`, `errorCode` y `errorMessage`; `src/app/(app)/(tabs)/profile.tsx` muestra ese estado real en vez de solo asumir éxito.
+- **Plantillas de WhatsApp:** si el sender sigue en sandbox o si el mensaje inicia conversación fuera de la ventana de 24 horas, hace falta `TWILIO_DEFAULT_WHATSAPP_CONTENT_SID` apuntando a una plantilla `HX...` aprobada para `WhatsApp business initiated`.
 
 ## Cambios de hoy (2026-04-01)
 
@@ -410,13 +440,14 @@ UI de resultados
 
 - **Búsqueda global:** `src/services/searchFallback.ts` agrega un fallback determinístico desde cliente sobre `family_members`, `medical_visits`, `prescriptions`, `medical_tests` y `medical_documents`.
 - **Búsqueda home:** `src/app/(app)/search.tsx` intenta primero el fallback local, luego `search-ai` y, si la edge function falla, cae a `search_global`.
+- **Asistente del historial:** `src/app/(app)/search.tsx` ahora se sugiere por heurística (`looksLikeHealthAgentQuestion`) pero se ejecuta solo mediante CTA explícita.
 - **Búsqueda historial:** `src/app/(app)/history.tsx` intenta primero buscar en memoria sobre los datos ya cargados del miembro y solo después usa `search_medical_history` / `search-ai`.
 - **Navegación de resultados:** la búsqueda global ahora soporta `navigation_id` para que un resultado tipo `document` pueda abrir la visita asociada cuando exista.
 - **Acceso compartido:** `supabase/migrations/023_pending_family_invitations.sql` agrega `tenant_invitations`, autoclaim al login (`claim_pending_tenant_invitations`) y RPC para listar invitaciones pendientes.
 - **Bootstrap de familia:** `src/store/familyStore.ts` reclama invitaciones pendientes al cargar sesión, de modo que un cuidador invitado entra directo a la familia después de registrarse e iniciar sesión con el mismo correo.
 - **UX de invitación:** `src/app/(app)/(tabs)/profile.tsx`, `src/screens/WelcomeScreen.tsx`, `src/screens/RegisterScreen.tsx` y `src/app/register.tsx` ya explican el flujo completo para usuarios existentes o nuevos.
 - **Plan del tenant:** `supabase/migrations/024_create_tenant_with_plan.sql` y `src/app/onboarding/index.tsx` mueven la selección de plan al onboarding de creación de familia, no al registro del usuario.
-- **Rutas de onboarding:** `src/app/login.tsx`, `src/app/onboarding/index.tsx`, `src/app/onboarding/member.tsx` y `src/app/(app)/(tabs)/index.tsx` ahora distinguen mejor entre invitado, owner sin familia y owner sin primer miembro.
+- **Rutas de onboarding:** `src/app/login.tsx`, `src/app/onboarding/index.tsx`, `src/app/onboarding/member.tsx`, `src/app/onboarding/contact.tsx` y `src/app/(app)/(tabs)/index.tsx` ahora distinguen mejor entre invitado, owner sin familia, owner sin primer miembro y usuario sin celular guardado.
 - **Borrado de adjuntos:** `supabase/migrations/025_delete_document_keep_clinical_data.sql` y `src/app/(app)/visit/[id].tsx` permiten eliminar el archivo original sin perder medicamentos ni exámenes ya confirmados.
 - **Root routing:** `src/app/index.tsx` ya no deja ver `WelcomeScreen` si existe una sesión activa; resuelve de inmediato si debe abrir onboarding, agregar primer miembro o entrar a tabs.
 - **Recuperación de contraseña:** `src/screens/LoginScreen.tsx`, `src/app/forgot-password.tsx`, `src/app/reset-password.tsx`, `src/screens/ForgotPasswordScreen.tsx` y `src/screens/UpdatePasswordScreen.tsx` cubren el flujo completo de “olvidé mi contraseña” con deep link móvil.

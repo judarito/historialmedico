@@ -18,6 +18,7 @@ import { useFamilyStore } from '../../store/familyStore';
 import { Colors, Typography, Spacing, Radius } from '../../theme';
 import { DatePickerField } from '../../components/ui/DatePickerField';
 import type { Database } from '../../types/database.types';
+import { hasCompletedProfilePhone } from '../../utils/authRouting';
 
 type RelType = Database['public']['Tables']['family_members']['Row']['relationship'];
 
@@ -66,7 +67,9 @@ export default function OnboardingAddMember() {
 
       const nextState = useFamilyStore.getState();
       if (nextState.members.length > 0) {
-        router.replace('/(app)/(tabs)');
+        const hasPhone = await hasCompletedProfilePhone();
+        if (!active) return;
+        router.replace(hasPhone ? '/(app)/(tabs)' : '/onboarding/contact');
         return;
       }
 
@@ -98,7 +101,7 @@ export default function OnboardingAddMember() {
       eps_name:     epsName.trim() || undefined,
     });
     if (err) { Alert.alert('Error', err); return; }
-    router.replace('/(app)/(tabs)');
+    router.replace('/onboarding/contact');
   }
 
   const relLabel = RELATIONSHIPS.find(r => r.value === relationship)?.label ?? relationship;

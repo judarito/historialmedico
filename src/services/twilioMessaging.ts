@@ -17,6 +17,9 @@ export interface SendTwilioMessageResponse {
   channel: TwilioChannel;
   sid: string | null;
   status: string | null;
+  deliveryStatus?: string | null;
+  errorCode?: string | number | null;
+  errorMessage?: string | null;
   to: string;
   sandbox?: boolean;
 }

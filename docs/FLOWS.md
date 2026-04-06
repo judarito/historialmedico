@@ -36,6 +36,7 @@ const { data } = await supabase.rpc("create_tenant_with_owner", {
 - Si el usuario ya fue invitado a una familia existente, no debería pasar por este flujo.
 - Si existía un tenant previo sin familia por un fallo antiguo, la misma RPC ahora completa esa familia faltante en vez de crear otro tenant.
 - Antes de `signUp`, la app consulta `check_auth_email_status` para no dejar pasar correos ya registrados en Supabase Auth.
+- Después de crear familia y primer miembro, la app todavía puede exigir un paso adicional: capturar `profiles.phone` en `onboarding/contact` antes de entrar a tabs.
 
 ---
 
@@ -128,6 +129,28 @@ const { data: member } = await supabase
   })
   .select().single();
 ```
+
+## Flujo 3B: Capturar celular del usuario para WhatsApp / SMS
+
+```
+Usuario autenticado         App móvil                    Supabase
+      |                        |                            |
+      |-- termina familia ---->|                            |
+      |-- termina primer miembro                           |
+      |                        |-- revisa profiles.phone -->|
+      |                        |<-- null / vacío ---------- |
+      |<-- abre onboarding/contact                         |
+      |-- guarda +573001112233 -->|                        |
+      |                        |-- UPDATE profiles.phone -->|
+      |                        |<-- ok ---------------------|
+      |<-- entra a tabs/app ---|                            |
+```
+
+**Notas actuales:**
+- El número no se pide en `register`; se captura después del alta básica de la familia.
+- Si el usuario ya tenía familia y miembros pero aún no tenía celular guardado, `resolveAuthenticatedRoute()` también lo redirige a `onboarding/contact`.
+- La pantalla acepta móviles colombianos como `3001112233` y los normaliza a `+573001112233`.
+- El mismo `profiles.phone` se usa luego para pruebas de WhatsApp/SMS desde Perfil.
 
 ---
 
@@ -258,6 +281,54 @@ Usuario                   App movil               Edge Function                P
 - Desde la lista o la ficha del directorio ya se puede tocar `Crear visita`; eso abre `add-visit` con medico/especialidad/institucion precargados, y si no venia un familiar fijo permite escogerlo antes de guardar.
 - `doctor-directory` precarga la ciudad preferida del perfil del usuario usando `get_preferred_city`.
 - Cuando `Solo favoritos` está activo, la busqueda se resuelve localmente sobre los guardados del usuario y no dispara Google Places.
+
+---
+
+## Flujo 4E: Búsqueda global + agente del historial desacoplados
+
+```
+Usuario                   SearchScreen
+   |                           |
+   |-- escribe query --------> |-- debounce 500ms
+   |                           |-- searchGlobalFallback()
+   |                           |-- si no hay resultados -> search-ai
+   |                           |-- si falla -> search_global
+   |<-- resultados navegables -|
+   |                           |
+   |-- consulta parece pregunta|
+   |<-- CTA "Preguntar al asistente"
+   |-- toca CTA -------------> |-- ask-health-agent
+   |<-- respuesta del agente --|
+```
+
+**Notas actuales:**
+- El agente RAG ya no se ejecuta por cada caracter digitado.
+- `looksLikeHealthAgentQuestion()` solo sugiere mostrar la CTA, pero no dispara la consulta automáticamente.
+- La búsqueda general y el asistente tienen estados separados (`loading`, errores y cancelación) para que no se pisen entre sí.
+- Al limpiar o editar el query, la respuesta previa del asistente se descarta para evitar mezclar resultados viejos con la búsqueda actual.
+
+---
+
+## Flujo 4F: Prueba de WhatsApp con Twilio
+
+```
+Usuario                 App móvil                 Edge Function                Twilio
+   |                        |                            |                        |
+   |-- toca "Enviar..." --->|-- sendWhatsAppTestToMyPhone()                      |
+   |                        |-- invoke send-twilio-message ---------------------> |
+   |                        |                            |-- POST Messages ------>|
+   |                        |                            |<-- sid + queued -------|
+   |                        |                            |-- GET Message SID ---->|
+   |                        |                            |<-- delivery status ----|
+   |<-- estado real --------|                            |                        |
+```
+
+**Notas actuales:**
+- El destinatario sale de `profiles.phone` del usuario autenticado; la app normal no permite mandar pruebas a otro número.
+- La función devuelve `status` y `deliveryStatus`; `status='queued'` no significa entrega exitosa.
+- Si `sandbox=true`, el sender sigue siendo `whatsapp:+14155238886` y el número debe haberse unido al sandbox.
+- Si `deliveryStatus='undelivered'` con `errorCode=63016`, Twilio está rechazando el mensaje por intentar iniciar conversación fuera de la ventana permitida sin una plantilla válida.
+- Para ese caso hace falta configurar `TWILIO_DEFAULT_WHATSAPP_CONTENT_SID` con un `HX...` aprobado para `WhatsApp business initiated`.
 
 ---
 

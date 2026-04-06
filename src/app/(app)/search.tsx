@@ -117,14 +117,23 @@ export default function SearchScreen() {
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const inputRef    = useRef<TextInput>(null);
   const searchRunRef = useRef(0);
+  const agentRunRef = useRef(0);
+
+  function resetAgentState() {
+    agentRunRef.current += 1;
+    setAgentResponse(null);
+    setAgentError(null);
+    setAgentLoading(false);
+  }
 
   function handleQueryChange(text: string) {
     setQuery(text);
     if (debounceRef.current) clearTimeout(debounceRef.current);
+    resetAgentState();
+    setSearchError(null);
 
     if (!text.trim()) {
       setResults([]); setExpansion(null); setSearchError(null);
-      setAgentResponse(null); setAgentError(null); setAgentLoading(false);
       setFilter('all');
       setSearched(false); setLoading(false);
       searchRunRef.current += 1;
@@ -138,15 +147,15 @@ export default function SearchScreen() {
   async function loadAgentAnswer(q: string, runId: number) {
     try {
       const response = await askHealthAgent(q);
-      if (runId !== searchRunRef.current) return;
+      if (runId !== agentRunRef.current) return;
       setAgentResponse(response);
       setAgentError(null);
     } catch (error) {
-      if (runId !== searchRunRef.current) return;
+      if (runId !== agentRunRef.current) return;
       setAgentResponse(null);
       setAgentError(error instanceof Error ? error.message : 'No se pudo obtener la respuesta del asistente.');
     } finally {
-      if (runId === searchRunRef.current) {
+      if (runId === agentRunRef.current) {
         setAgentLoading(false);
       }
     }
@@ -154,15 +163,7 @@ export default function SearchScreen() {
 
   async function runSearch(q: string) {
     const runId = ++searchRunRef.current;
-    const shouldUseAgent = looksLikeHealthAgentQuestion(q);
     setSearchError(null);
-    setAgentResponse(null);
-    setAgentError(null);
-    setAgentLoading(shouldUseAgent);
-
-    if (shouldUseAgent) {
-      void loadAgentAnswer(q, runId);
-    }
 
     try {
       const fallbackResults = await searchGlobalFallback(q, 40);
@@ -225,10 +226,23 @@ export default function SearchScreen() {
     setExpansion(null);
   }
 
+  function runAgentSearch(q: string) {
+    const trimmed = q.trim();
+    if (!trimmed) return;
+
+    const runId = ++agentRunRef.current;
+    setAgentResponse(null);
+    setAgentError(null);
+    setAgentLoading(true);
+    void loadAgentAnswer(trimmed, runId);
+  }
+
   function handleVoiceTranscription(text: string) {
     if (!text.trim()) return;
     setQuery(text);
     if (debounceRef.current) clearTimeout(debounceRef.current);
+    resetAgentState();
+    setSearchError(null);
     setLoading(true);
     runSearch(text.trim());
   }
@@ -255,6 +269,7 @@ export default function SearchScreen() {
   const filtered: SearchResult[] = filter === 'all'
     ? deduplicateForAll(results)
     : results.filter(r => r.filter_category === filter);
+  const shouldSuggestAgent = looksLikeHealthAgentQuestion(query);
 
   // Conteos por categoría
   const counts = results.reduce<Record<string, number>>((acc, r) => {
@@ -336,7 +351,10 @@ export default function SearchScreen() {
               autoCorrect={false}
               autoFocus
               returnKeyType="search"
-              onSubmitEditing={() => { if (debounceRef.current) clearTimeout(debounceRef.current); if (query.trim()) runSearch(query.trim()); }}
+              onSubmitEditing={() => {
+                if (debounceRef.current) clearTimeout(debounceRef.current);
+                if (query.trim()) runSearch(query.trim());
+              }}
             />
             {loading
               ? <ActivityIndicator size="small" color={Colors.primary} />
@@ -344,6 +362,7 @@ export default function SearchScreen() {
                 ? (
                   <TouchableOpacity onPress={() => {
                     searchRunRef.current += 1;
+                    agentRunRef.current += 1;
                     setQuery('');
                     setFilter('all');
                     setLoading(false);
@@ -387,6 +406,30 @@ export default function SearchScreen() {
                 ))}
               </ScrollView>
             )}
+          </View>
+        )}
+
+        {query.trim() && shouldSuggestAgent && (
+          <View style={styles.agentCtaCard}>
+            <View style={styles.agentCtaCopy}>
+              <View style={styles.agentCtaTitleRow}>
+                <Ionicons name="sparkles" size={15} color={Colors.primary} />
+                <Text style={styles.agentCtaTitle}>Esta consulta parece una pregunta para el asistente</Text>
+              </View>
+              <Text style={styles.agentCtaText}>
+                La búsqueda general sigue mostrando resultados navegables. Si quieres una respuesta resumida del historial, ejecútala aparte.
+              </Text>
+            </View>
+            <TouchableOpacity
+              style={[styles.agentCtaButton, agentLoading && styles.agentCtaButtonDisabled]}
+              onPress={() => runAgentSearch(query)}
+              disabled={agentLoading}
+              activeOpacity={0.85}
+            >
+              {agentLoading
+                ? <ActivityIndicator size="small" color={Colors.white} />
+                : <Text style={styles.agentCtaButtonText}>Preguntar al asistente</Text>}
+            </TouchableOpacity>
           </View>
         )}
 
@@ -603,6 +646,50 @@ const styles = StyleSheet.create({
     paddingHorizontal: Spacing.sm, paddingVertical: 3, marginLeft: Spacing.xs,
   },
   aiTermText: { color: Colors.primary, fontSize: Typography.xs, fontWeight: Typography.medium },
+  agentCtaCard: {
+    marginHorizontal: Spacing.base,
+    marginTop: Spacing.sm,
+    padding: Spacing.md,
+    borderRadius: Radius.lg,
+    borderWidth: 1,
+    borderColor: Colors.primary + '24',
+    backgroundColor: Colors.primary + '0C',
+    gap: Spacing.md,
+  },
+  agentCtaCopy: { gap: Spacing.xs },
+  agentCtaTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.xs,
+  },
+  agentCtaTitle: {
+    color: Colors.textPrimary,
+    fontSize: Typography.sm,
+    fontWeight: Typography.semibold,
+    flex: 1,
+  },
+  agentCtaText: {
+    color: Colors.textSecondary,
+    fontSize: Typography.xs,
+    lineHeight: 18,
+  },
+  agentCtaButton: {
+    alignSelf: 'flex-start',
+    minHeight: 40,
+    paddingHorizontal: Spacing.md,
+    borderRadius: Radius.full,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: Colors.primary,
+  },
+  agentCtaButtonDisabled: {
+    opacity: 0.7,
+  },
+  agentCtaButtonText: {
+    color: Colors.white,
+    fontSize: Typography.sm,
+    fontWeight: Typography.semibold,
+  },
   agentCard: {
     marginHorizontal: Spacing.base,
     marginTop: Spacing.sm,

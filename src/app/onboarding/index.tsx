@@ -18,6 +18,7 @@ import { useFamilyStore } from '../../store/familyStore';
 import { Colors, Typography, Spacing, Radius } from '../../theme';
 import { DEFAULT_TENANT_PLAN, TENANT_PLAN_OPTIONS, getTenantPlanLabel } from '../../constants/tenantPlans';
 import type { TenantPlan } from '../../types/database.types';
+import { hasCompletedProfilePhone } from '../../utils/authRouting';
 
 export default function OnboardingCreateFamily() {
   const [name, setName] = useState('');
@@ -50,7 +51,14 @@ export default function OnboardingCreateFamily() {
       if (!active) return;
 
       const nextState = useFamilyStore.getState();
-      router.replace(nextState.members.length === 0 ? '/onboarding/member' : '/(app)/(tabs)');
+      if (nextState.members.length === 0) {
+        router.replace('/onboarding/member');
+        return;
+      }
+
+      const hasPhone = await hasCompletedProfilePhone();
+      if (!active) return;
+      router.replace(hasPhone ? '/(app)/(tabs)' : '/onboarding/contact');
     }
 
     void resolveOnboardingRoute();

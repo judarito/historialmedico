@@ -72,6 +72,10 @@ function getAuthorizationHeader(): string {
   return `Basic ${credentials}`;
 }
 
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function getAuthenticatedUser(authHeader: string | null) {
   if (!authHeader) return { user: null, client: null, error: "Missing Authorization header" };
   if (!SUPABASE_URL || !SUPABASE_ANON_KEY) return { user: null, client: null, error: "Supabase auth environment is incomplete" };
@@ -222,6 +226,86 @@ async function sendTwilioMessage(params: {
     twilioStatus: data?.status ?? null,
     to: data?.to ?? to,
     from: data?.from ?? params.from ?? null,
+    errorCode: data?.error_code ?? null,
+    errorMessage: data?.error_message ?? null,
+  };
+}
+
+async function fetchTwilioMessageStatus(messageSid: string) {
+  const response = await fetch(
+    `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Messages/${messageSid}.json`,
+    {
+      method: "GET",
+      headers: {
+        Authorization: getAuthorizationHeader(),
+      },
+    },
+  );
+
+  const raw = await response.text();
+  let data: Record<string, unknown> | null = null;
+  try {
+    data = raw ? JSON.parse(raw) : null;
+  } catch {
+    data = null;
+  }
+
+  if (!response.ok) {
+    return {
+      ok: false,
+      error: (data?.message as string | undefined) ?? raw ?? "No pudimos consultar el estado del mensaje en Twilio.",
+    };
+  }
+
+  return {
+    ok: true,
+    status: (data?.status as string | null) ?? null,
+    errorCode: data?.error_code ?? null,
+    errorMessage: data?.error_message ?? null,
+  };
+}
+
+async function getDeliverySnapshot(messageSid: string | null) {
+  if (!messageSid) {
+    return {
+      status: null,
+      errorCode: null,
+      errorMessage: null,
+    };
+  }
+
+  let latestStatus: string | null = null;
+  let latestErrorCode: unknown = null;
+  let latestErrorMessage: unknown = null;
+  const terminalStatuses = new Set(["delivered", "undelivered", "failed", "read", "canceled"]);
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    if (attempt > 0) {
+      await sleep(1200);
+    }
+
+    const snapshot = await fetchTwilioMessageStatus(messageSid);
+    if (!snapshot.ok) {
+      return {
+        status: latestStatus,
+        errorCode: latestErrorCode,
+        errorMessage: typeof snapshot.error === "string" ? snapshot.error : latestErrorMessage,
+      };
+    }
+
+    latestStatus = snapshot.status;
+    latestErrorCode = snapshot.errorCode;
+    latestErrorMessage = snapshot.errorMessage;
+
+    if (latestStatus && terminalStatuses.has(latestStatus)) {
+      break;
+    }
+  }
+
+  return {
+    status: latestStatus,
+    errorCode: latestErrorCode,
+    errorMessage: latestErrorMessage,
   };
 }
 
@@ -299,14 +383,20 @@ serve(async (req) => {
       channel,
       to: recipient.phone,
       sid: result.sid,
+      status: result.twilioStatus,
       authenticated: !internalSecretValid,
     });
+
+    const deliverySnapshot = await getDeliverySnapshot(typeof result.sid === "string" ? result.sid : null);
 
     return jsonResponse({
       ok: true,
       channel,
       sid: result.sid,
       status: result.twilioStatus,
+      deliveryStatus: deliverySnapshot.status,
+      errorCode: deliverySnapshot.errorCode ?? result.errorCode ?? null,
+      errorMessage: deliverySnapshot.errorMessage ?? result.errorMessage ?? null,
       to: recipient.phone,
       sandbox: DEFAULT_WHATSAPP_FROM === "whatsapp:+14155238886",
     });

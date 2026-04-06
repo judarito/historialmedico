@@ -468,11 +468,18 @@ export default function ProfileTab() {
     setTestingWhatsApp(true);
     try {
       const result = await sendWhatsAppTestToMyPhone();
+      const latestStatus = result.deliveryStatus ?? result.status ?? 'desconocido';
+      const details = [
+        `Estado Twilio: ${latestStatus}`,
+        result.sid ? `SID: ${result.sid}` : null,
+        result.errorMessage ? `Detalle: ${result.errorMessage}` : null,
+      ].filter(Boolean).join('\n');
+
       Alert.alert(
-        'Prueba enviada',
+        latestStatus === 'delivered' ? 'Mensaje entregado' : 'Resultado del envío',
         result.sandbox
-          ? 'Twilio aceptó el envío. Si usas Sandbox, confirma que tu número ya se unió al sandbox de WhatsApp.'
-          : 'Twilio aceptó el envío del mensaje de prueba.',
+          ? `${details}\n\nSi usas Sandbox, confirma que ese número ya se unió al sandbox de WhatsApp de Twilio.`
+          : details,
       );
     } catch (error) {
       Alert.alert(
