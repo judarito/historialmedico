@@ -84,25 +84,71 @@ export function DatePickerField({
     setShow(true);
   }
 
+  function handleWebChange(rawValue: string) {
+    if (!rawValue) {
+      onChange('');
+      return;
+    }
+
+    const parsed = parseDateValue(rawValue);
+    if (!parsed) return;
+    onChange(formatInputValue(parsed, withTime));
+  }
+
+  const webInputType = withTime ? 'datetime-local' : 'date';
+  const webMin = minimumDate ? formatInputValue(minimumDate, withTime) : undefined;
+  const webMax = maximumDate ? formatInputValue(maximumDate, withTime) : undefined;
+
   return (
     <View style={styles.wrap}>
       <Text style={styles.label}>{label}</Text>
-      <TouchableOpacity
-        style={[styles.button, error ? styles.buttonError : null]}
-        onPress={openPicker}
-        activeOpacity={0.7}
-      >
-        <Ionicons
-          name="calendar-outline"
-          size={18}
-          color={Colors.textSecondary}
-          style={styles.icon}
-        />
-        <Text style={[styles.value, !value && styles.placeholder]}>
-          {value ? toDisplayDate(value, withTime) : (placeholder ?? 'Selecciona una fecha')}
-        </Text>
-        <Ionicons name="chevron-down" size={16} color={Colors.textMuted} />
-      </TouchableOpacity>
+      {Platform.OS === 'web' ? (
+        <View style={[styles.webInputWrap, error ? styles.buttonError : null]}>
+          <Ionicons
+            name="calendar-outline"
+            size={18}
+            color={Colors.textSecondary}
+            style={styles.icon}
+          />
+          <input
+            aria-label={label}
+            type={webInputType}
+            value={value}
+            min={webMin}
+            max={webMax}
+            step={withTime ? 60 : undefined}
+            placeholder={placeholder ?? (withTime ? 'Selecciona fecha y hora' : 'Selecciona una fecha')}
+            onChange={(event) => handleWebChange(event.currentTarget.value)}
+            style={{
+              flex: 1,
+              minWidth: 0,
+              height: '100%',
+              backgroundColor: 'transparent',
+              color: Colors.textPrimary,
+              border: 'none',
+              outline: 'none',
+              fontSize: Typography.base,
+            }}
+          />
+        </View>
+      ) : (
+        <TouchableOpacity
+          style={[styles.button, error ? styles.buttonError : null]}
+          onPress={openPicker}
+          activeOpacity={0.7}
+        >
+          <Ionicons
+            name="calendar-outline"
+            size={18}
+            color={Colors.textSecondary}
+            style={styles.icon}
+          />
+          <Text style={[styles.value, !value && styles.placeholder]}>
+            {value ? toDisplayDate(value, withTime) : (placeholder ?? 'Selecciona una fecha')}
+          </Text>
+          <Ionicons name="chevron-down" size={16} color={Colors.textMuted} />
+        </TouchableOpacity>
+      )}
       {!!error && <Text style={styles.error}>{error}</Text>}
 
       {show && (
@@ -128,6 +174,16 @@ const styles = StyleSheet.create({
     fontWeight: Typography.medium,
   },
   button: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: Colors.surface,
+    borderRadius: Radius.md,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    paddingHorizontal: Spacing.md,
+    height: 52,
+  },
+  webInputWrap: {
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: Colors.surface,

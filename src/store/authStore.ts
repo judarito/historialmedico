@@ -153,13 +153,18 @@ export const useAuthStore = create<AuthState>((set) => ({
   },
 
   signOut: async () => {
+    set({ loading: true });
     try {
       if (supabaseInitError) throw supabaseInitError;
-      await supabase.auth.signOut();
+
+      const { error } = await supabase.auth.signOut({ scope: 'local' });
+      if (error) {
+        throw error;
+      }
     } catch (error) {
       await captureException('authStore.signOut', error);
     } finally {
-      set({ session: null, user: null });
+      set({ session: null, user: null, loading: false });
     }
   },
 }));

@@ -137,6 +137,15 @@ Esto reduce la dependencia de una sola capa y deja la UX más resiliente cuando 
 - La Edge Function devuelve tanto el `status` inicial de Twilio como un `deliveryStatus` consultado segundos después del envío.
 - Si el canal sigue en sandbox (`TWILIO_WHATSAPP_FROM=whatsapp:+14155238886`), el número debe haberse unido al sandbox de Twilio.
 - Para iniciar conversaciones por WhatsApp fuera de la ventana de 24 horas, se requiere una plantilla con `ContentSid` (`HX...`) aprobada para `WhatsApp business initiated`; un `body` libre produce `63016`.
+- El cierre de sesión desde perfil ya usa confirmación compatible con web (`confirm`) y móvil (`Alert`) para evitar botones inertes en navegador.
+
+### Agenda de citas futuras
+- `src/app/(app)/appointments.tsx` funciona como scheduler liviano: consulta `medical_visits` con `status='scheduled'`, agrupa por día y enlaza al detalle de cada cita.
+- `src/app/(app)/add-visit.tsx` soporta modo express para citas futuras: abre con una fecha sugerida, deja diagnóstico/observaciones/signos vitales como detalles opcionales, autocompleta el campo `Médico` con favoritos del directorio mientras el usuario escribe y, al guardar en web o móvil, regresa a la agenda de citas.
+- `src/screens/DashboardScreen.tsx` expone dos accesos rápidos nuevos: `Agendar cita express` y `Ver agenda`.
+- `src/components/ui/DatePickerField.tsx` usa picker nativo en móvil y fallback web con `date` / `datetime-local` para que la fecha sea visible y editable también en navegador.
+- `src/app/(app)/doctor-directory.tsx` y `src/app/(app)/doctor-place/[id].tsx` pueden devolver al usuario a `add-visit` con el especialista elegido sin borrar el resto del formulario que ya venía llenando.
+- `src/app/(app)/visit/[id].tsx` ahora soporta dictado del médico durante la consulta: graba audio, usa STT nativo, manda la transcripción a `voice-to-data`, crea un `medical_document` tipo `voice_note` y deriva medicamentos/exámenes con `confirm_document_and_create_records`.
 
 ---
 
@@ -159,30 +168,19 @@ src/
 │   │   ├── login.tsx
 │   │   └── register.tsx
 │   ├── (app)/
-│   │   ├── _layout.tsx     # Tab navigator
-│   │   ├── dashboard.tsx
-│   │   ├── family/
-│   │   │   ├── index.tsx   # Lista familias
-│   │   │   ├── [id].tsx    # Detalle familia
-│   │   │   └── member/
-│   │   │       ├── [id].tsx # Perfil familiar
-│   │   │       └── new.tsx
-│   │   ├── visits/
-│   │   │   ├── new.tsx
-│   │   │   └── [id].tsx
-│   │   ├── prescriptions/
-│   │   │   ├── scan.tsx    # Cámara + IA
-│   │   │   ├── review.tsx  # Confirmación datos IA
-│   │   │   └── [id].tsx
-│   │   ├── medications/
-│   │   │   ├── active.tsx
-│   │   │   └── schedule.tsx
-│   │   ├── tests/
-│   │   │   └── index.tsx
-│   │   ├── alerts/
-│   │   │   └── index.tsx
-│   │   └── search/
-│   │       └── index.tsx
+│   │   ├── _layout.tsx
+│   │   ├── add-visit.tsx
+│   │   ├── appointments.tsx
+│   │   ├── history.tsx
+│   │   ├── notifications.tsx
+│   │   ├── search.tsx
+│   │   ├── visit/[id].tsx
+│   │   └── (tabs)/
+│   │       ├── index.tsx
+│   │       ├── family.tsx
+│   │       ├── medications.tsx
+│   │       ├── profile.tsx
+│   │       └── scan.tsx
 ├── components/
 │   ├── ui/                 # Componentes base
 │   ├── medical/            # Componentes del dominio

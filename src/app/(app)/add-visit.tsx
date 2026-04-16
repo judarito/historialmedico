@@ -14,6 +14,7 @@ import {
 } from 'react-native';
 import { useLocalSearchParams, router } from 'expo-router';
 import { supabase } from '../../services/supabase';
+import { MedicalDirectoryService, type MedicalDirectoryPlace } from '../../services/medicalDirectory';
 import { useFamilyStore } from '../../store/familyStore';
 import { useAuthStore } from '../../store/authStore';
 import { Colors, Typography, Spacing, Radius } from '../../theme';
@@ -22,6 +23,23 @@ import { VoiceRecordButton } from '../../components/ui/VoiceRecordButton';
 import { createCurrentDateTimeInput, toInputValue, toStoredIso } from '../../utils';
 
 type VisitStatus = 'draft' | 'scheduled' | 'completed' | 'cancelled';
+
+function createExpressFutureDateTimeInput(): string {
+  const next = new Date();
+  next.setDate(next.getDate() + 1);
+  next.setHours(9, 0, 0, 0);
+  return toInputValue(next.toISOString(), true) || createCurrentDateTimeInput();
+}
+
+function normalizeSearchText(value: string): string {
+  return value
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
 
 export default function AddVisitScreen() {
   const params = useLocalSearchParams<{
@@ -32,6 +50,19 @@ export default function AddVisitScreen() {
     institutionName?: string | string[];
     sourcePlaceName?: string | string[];
     sourcePlaceKind?: string | string[];
+    mode?: string | string[];
+    defaultFuture?: string | string[];
+    visitDate?: string | string[];
+    reasonForVisit?: string | string[];
+    diagnosis?: string | string[];
+    notes?: string | string[];
+    weightKg?: string | string[];
+    heightCm?: string | string[];
+    temperatureC?: string | string[];
+    bloodPressure?: string | string[];
+    heartRate?: string | string[];
+    showOptionalDetails?: string | string[];
+    showVitals?: string | string[];
   }>();
 
   const initialMemberId = typeof params.memberId === 'string' ? params.memberId : '';
@@ -41,34 +72,83 @@ export default function AddVisitScreen() {
   const initialInstitutionName = typeof params.institutionName === 'string' ? params.institutionName : '';
   const sourcePlaceName = typeof params.sourcePlaceName === 'string' ? params.sourcePlaceName : '';
   const sourcePlaceKind = typeof params.sourcePlaceKind === 'string' ? params.sourcePlaceKind : '';
+  const screenMode = typeof params.mode === 'string' ? params.mode : '';
+  const defaultFuture = typeof params.defaultFuture === 'string' ? params.defaultFuture : '';
+  const initialVisitDate = typeof params.visitDate === 'string' ? params.visitDate : '';
+  const initialReasonForVisit = typeof params.reasonForVisit === 'string' ? params.reasonForVisit : '';
+  const initialDiagnosis = typeof params.diagnosis === 'string' ? params.diagnosis : '';
+  const initialNotes = typeof params.notes === 'string' ? params.notes : '';
+  const initialWeightKg = typeof params.weightKg === 'string' ? params.weightKg : '';
+  const initialHeightCm = typeof params.heightCm === 'string' ? params.heightCm : '';
+  const initialTemperatureC = typeof params.temperatureC === 'string' ? params.temperatureC : '';
+  const initialBloodPressure = typeof params.bloodPressure === 'string' ? params.bloodPressure : '';
+  const initialHeartRate = typeof params.heartRate === 'string' ? params.heartRate : '';
+  const isExpressSchedule = screenMode === 'schedule' || defaultFuture === '1';
+  const initialShowOptionalDetails = typeof params.showOptionalDetails === 'string'
+    ? params.showOptionalDetails !== '0'
+    : !isExpressSchedule;
+  const initialShowVitals = typeof params.showVitals === 'string'
+    ? params.showVitals === '1'
+    : false;
 
   const { tenant, family, members, fetchMembers } = useFamilyStore();
   const { user } = useAuthStore();
 
   // ── form state ────────────────────────────────────────────────────────
   const [selectedMemberId, setSelectedMemberId]   = useState(initialMemberId);
-  const [visitDate, setVisitDate]             = useState(createCurrentDateTimeInput());
+  const [visitDate, setVisitDate]             = useState(() => (
+    initialVisitDate || (isExpressSchedule ? createExpressFutureDateTimeInput() : createCurrentDateTimeInput())
+  ));
   const [doctorName, setDoctorName]           = useState(initialDoctorName);
   const [specialty, setSpecialty]             = useState(initialSpecialty);
   const [institutionName, setInstitutionName] = useState(initialInstitutionName);
-  const [reasonForVisit, setReasonForVisit]   = useState('');
-  const [diagnosis, setDiagnosis]             = useState('');
-  const [notes, setNotes]                     = useState('');
+  const [reasonForVisit, setReasonForVisit]   = useState(initialReasonForVisit);
+  const [diagnosis, setDiagnosis]             = useState(initialDiagnosis);
+  const [notes, setNotes]                     = useState(initialNotes);
+  const [showOptionalDetails, setShowOptionalDetails] = useState(initialShowOptionalDetails);
 
   // vitals
-  const [showVitals, setShowVitals]         = useState(false);
-  const [weightKg, setWeightKg]             = useState('');
-  const [heightCm, setHeightCm]             = useState('');
-  const [temperatureC, setTemperatureC]     = useState('');
-  const [bloodPressure, setBloodPressure]   = useState('');
-  const [heartRate, setHeartRate]           = useState('');
+  const [showVitals, setShowVitals]         = useState(initialShowVitals);
+  const [weightKg, setWeightKg]             = useState(initialWeightKg);
+  const [heightCm, setHeightCm]             = useState(initialHeightCm);
+  const [temperatureC, setTemperatureC]     = useState(initialTemperatureC);
+  const [bloodPressure, setBloodPressure]   = useState(initialBloodPressure);
+  const [heartRate, setHeartRate]           = useState(initialHeartRate);
 
   const [saving,        setSaving]        = useState(false);
   const [voiceLoading,  setVoiceLoading]  = useState(false);
+  const [favoritePlaces, setFavoritePlaces] = useState<MedicalDirectoryPlace[]>([]);
+  const [loadingFavorites, setLoadingFavorites] = useState(false);
+  const [favoritesError, setFavoritesError] = useState('');
+  const [showDoctorAutocomplete, setShowDoctorAutocomplete] = useState(false);
   const selectedMember = members.find((member) => member.id === selectedMemberId) ?? null;
   const selectedMemberName = selectedMember?.first_name ?? initialMemberName;
   const needsMemberSelection = !initialMemberId;
   const isPrefilledFromDirectory = Boolean(initialDoctorName || initialSpecialty || initialInstitutionName || sourcePlaceName);
+  const doctorNameQuery = normalizeSearchText(doctorName);
+  const doctorNameMatches = favoritePlaces
+    .filter((place) => {
+      if (!doctorNameQuery) return true;
+      const searchableBag = normalizeSearchText([
+        place.display_name,
+        place.formatted_address ?? '',
+        place.primary_type ?? '',
+      ].join(' '));
+      return doctorNameQuery.split(' ').every((token) => searchableBag.includes(token));
+    })
+    .slice(0, 5);
+  const doctorQuery = normalizeSearchText([doctorName, specialty, institutionName].filter(Boolean).join(' '));
+  const suggestedFavorites = favoritePlaces
+    .filter((place) => {
+      if (!doctorQuery) return true;
+      const searchableBag = normalizeSearchText([
+        place.display_name,
+        place.formatted_address ?? '',
+        place.primary_type ?? '',
+      ].join(' '));
+      return doctorQuery.split(' ').every((token) => searchableBag.includes(token));
+    })
+    .slice(0, 6);
 
   useEffect(() => {
     if (family?.id && members.length === 0) {
@@ -77,9 +157,115 @@ export default function AddVisitScreen() {
   }, [family?.id, members.length, fetchMembers]);
 
   useEffect(() => {
+    void loadFavoritePlaces();
+  }, []);
+
+  useEffect(() => {
     if (!needsMemberSelection || selectedMemberId || members.length !== 1) return;
     setSelectedMemberId(members[0].id);
   }, [members, needsMemberSelection, selectedMemberId]);
+
+  async function loadFavoritePlaces() {
+    setLoadingFavorites(true);
+    setFavoritesError('');
+    try {
+      const nextFavorites = await MedicalDirectoryService.listFavoritePlaces();
+      setFavoritePlaces(nextFavorites);
+    } catch (error) {
+      setFavoritesError(error instanceof Error ? error.message : 'No se pudieron cargar los favoritos del directorio');
+    } finally {
+      setLoadingFavorites(false);
+    }
+  }
+
+  function applyFavoritePlace(place: MedicalDirectoryPlace) {
+    setDoctorName(place.display_name);
+    if (!institutionName.trim() && place.place_kind && place.place_kind !== 'specialist') {
+      setInstitutionName(place.display_name);
+    }
+    setShowDoctorAutocomplete(false);
+  }
+
+  function openDirectorySearch() {
+    router.push({
+      pathname: '/(app)/doctor-directory',
+      params: {
+        memberId: selectedMemberId || initialMemberId,
+        memberName: selectedMemberName,
+        mode: screenMode,
+        defaultFuture,
+        visitDate,
+        doctorName,
+        specialty,
+        institutionName,
+        reasonForVisit,
+        diagnosis,
+        notes,
+        weightKg,
+        heightCm,
+        temperatureC,
+        bloodPressure,
+        heartRate,
+        showOptionalDetails: showOptionalDetails ? '1' : '0',
+        showVitals: showVitals ? '1' : '0',
+      },
+    });
+  }
+
+  function resetFormState() {
+    setSelectedMemberId(initialMemberId || (needsMemberSelection && members.length === 1 ? members[0].id : ''));
+    setVisitDate(initialVisitDate || (isExpressSchedule ? createExpressFutureDateTimeInput() : createCurrentDateTimeInput()));
+    setDoctorName(initialDoctorName);
+    setSpecialty(initialSpecialty);
+    setInstitutionName(initialInstitutionName);
+    setReasonForVisit(initialReasonForVisit);
+    setDiagnosis(initialDiagnosis);
+    setNotes(initialNotes);
+    setShowOptionalDetails(initialShowOptionalDetails);
+    setShowVitals(initialShowVitals);
+    setWeightKg(initialWeightKg);
+    setHeightCm(initialHeightCm);
+    setTemperatureC(initialTemperatureC);
+    setBloodPressure(initialBloodPressure);
+    setHeartRate(initialHeartRate);
+  }
+
+  function completeSave(visitStatus: VisitStatus) {
+    const title = visitStatus === 'scheduled' ? 'Cita programada' : 'Visita guardada';
+    const message = visitStatus === 'scheduled'
+      ? 'La cita futura fue creada y el sistema podra recordartela.'
+      : 'La visita fue registrada correctamente.';
+
+    if (isExpressSchedule && visitStatus === 'scheduled') {
+      resetFormState();
+      if (Platform.OS === 'web') {
+        globalThis.alert?.([title, message].filter(Boolean).join('\n\n'));
+      }
+      router.replace('/(app)/appointments');
+      return;
+    }
+
+    if (Platform.OS === 'web') {
+      globalThis.alert?.([title, message].filter(Boolean).join('\n\n'));
+      resetFormState();
+      router.back();
+      return;
+    }
+
+    Alert.alert(title, message, [
+      {
+        text: isExpressSchedule && visitStatus === 'scheduled' ? 'Ver agenda' : 'OK',
+        onPress: () => {
+          resetFormState();
+          if (isExpressSchedule && visitStatus === 'scheduled') {
+            router.replace('/(app)/appointments');
+            return;
+          }
+          router.back();
+        },
+      },
+    ]);
+  }
 
   // ── voice ─────────────────────────────────────────────────────────────
   async function handleVoiceTranscription(transcription: string) {
@@ -192,13 +378,7 @@ export default function AddVisitScreen() {
     if (error) {
       Alert.alert('Error al guardar', error.message);
     } else {
-      Alert.alert(
-        visitStatus === 'scheduled' ? 'Cita programada' : 'Visita guardada',
-        visitStatus === 'scheduled'
-          ? 'La cita futura fue creada y el sistema podra recordartela.'
-          : 'La visita fue registrada correctamente.',
-        [{ text: 'OK', onPress: () => router.back() }]
-      );
+      completeSave(visitStatus);
     }
   }
 
@@ -211,7 +391,7 @@ export default function AddVisitScreen() {
           <Text style={styles.backArrow}>‹</Text>
         </TouchableOpacity>
         <View style={styles.headerText}>
-          <Text style={styles.headerTitle}>Nueva Visita</Text>
+          <Text style={styles.headerTitle}>{isExpressSchedule ? 'Nueva cita express' : 'Nueva Visita'}</Text>
           {!!selectedMemberName && (
             <Text style={styles.headerSub}>{selectedMemberName}</Text>
           )}
@@ -246,7 +426,9 @@ export default function AddVisitScreen() {
           withTime
         />
         <Text style={styles.helperText}>
-          Si eliges una fecha futura, se guardara como cita programada y recibiras recordatorios.
+          {isExpressSchedule
+            ? 'Te sugerimos una cita futura por defecto para que la agendes en pocos toques. Puedes cambiarla antes de guardar.'
+            : 'Si eliges una fecha futura, se guardara como cita programada y recibiras recordatorios.'}
         </Text>
 
         {needsMemberSelection && (
@@ -296,14 +478,106 @@ export default function AddVisitScreen() {
         )}
 
         <Field label="Médico">
-          <TextInput
-            style={styles.input}
-            value={doctorName}
-            onChangeText={setDoctorName}
-            placeholder="Nombre del médico"
-            placeholderTextColor={Colors.textMuted}
-          />
+          <View style={styles.autocompleteWrap}>
+            <TextInput
+              style={styles.input}
+              value={doctorName}
+              onChangeText={(value) => {
+                setDoctorName(value);
+                setShowDoctorAutocomplete(true);
+              }}
+              onFocus={() => setShowDoctorAutocomplete(true)}
+              onBlur={() => {
+                setTimeout(() => setShowDoctorAutocomplete(false), 120);
+              }}
+              placeholder="Nombre del médico"
+              placeholderTextColor={Colors.textMuted}
+              autoCorrect={false}
+              autoCapitalize="words"
+            />
+
+            {showDoctorAutocomplete && !loadingFavorites && doctorNameMatches.length > 0 && (
+              <View style={styles.autocompleteList}>
+                {doctorNameMatches.map((place) => (
+                  <TouchableOpacity
+                    key={place.id}
+                    style={styles.autocompleteItem}
+                    onPress={() => applyFavoritePlace(place)}
+                    activeOpacity={0.8}
+                  >
+                    <Text style={styles.autocompleteTitle}>{place.display_name}</Text>
+                    {!!place.formatted_address && (
+                      <Text style={styles.autocompleteMeta} numberOfLines={1}>
+                        {place.formatted_address}
+                      </Text>
+                    )}
+                  </TouchableOpacity>
+                ))}
+              </View>
+            )}
+          </View>
         </Field>
+
+        <View style={styles.directoryAssistCard}>
+          <View style={styles.directoryAssistHeader}>
+            <View style={styles.directoryAssistCopy}>
+              <Text style={styles.directoryAssistTitle}>Autocompletar desde favoritos</Text>
+              <Text style={styles.directoryAssistText}>
+                Usa especialistas o lugares guardados. Si no está aquí, abre la búsqueda del directorio.
+              </Text>
+            </View>
+            <TouchableOpacity
+              style={styles.directoryAssistAction}
+              onPress={openDirectorySearch}
+              activeOpacity={0.8}
+            >
+              <Text style={styles.directoryAssistActionText}>Buscar</Text>
+            </TouchableOpacity>
+          </View>
+
+          {loadingFavorites ? (
+            <View style={styles.favoriteStateRow}>
+              <ActivityIndicator size="small" color={Colors.primary} />
+              <Text style={styles.favoriteStateText}>Cargando favoritos...</Text>
+            </View>
+          ) : favoritesError ? (
+            <Text style={styles.favoriteErrorText}>{favoritesError}</Text>
+          ) : favoritePlaces.length === 0 ? (
+            <Text style={styles.favoriteStateText}>
+              Aún no tienes favoritos guardados. Puedes buscar un médico o clínica en el directorio.
+            </Text>
+          ) : suggestedFavorites.length === 0 ? (
+            <Text style={styles.favoriteStateText}>
+              No encontramos coincidencias en tus favoritos con lo que llevas escrito.
+            </Text>
+          ) : (
+            <View style={styles.favoriteChipList}>
+              {suggestedFavorites.map((place) => {
+                const active = doctorName.trim() === place.display_name.trim();
+                return (
+                  <TouchableOpacity
+                    key={place.id}
+                    style={[styles.favoriteChip, active && styles.favoriteChipActive]}
+                    onPress={() => applyFavoritePlace(place)}
+                    activeOpacity={0.8}
+                  >
+                    <Text style={[styles.favoriteChipTitle, active && styles.favoriteChipTitleActive]}>
+                      {place.display_name}
+                    </Text>
+                    {!!place.formatted_address && (
+                      <Text
+                        style={[styles.favoriteChipMeta, active && styles.favoriteChipMetaActive]}
+                        numberOfLines={1}
+                      >
+                        {place.formatted_address}
+                      </Text>
+                    )}
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+          )}
+        </View>
 
         <Field label="Especialidad">
           <TextInput
@@ -330,102 +604,122 @@ export default function AddVisitScreen() {
             style={styles.input}
             value={reasonForVisit}
             onChangeText={setReasonForVisit}
-            placeholder="¿Por qué se realizó la visita?"
+            placeholder={isExpressSchedule ? '¿Para qué es la cita?' : '¿Por qué se realizó la visita?'}
             placeholderTextColor={Colors.textMuted}
           />
         </Field>
 
-        <Field label="Diagnóstico">
-          <TextInput
-            style={[styles.input, styles.multiline, { height: 80 }]}
-            value={diagnosis}
-            onChangeText={setDiagnosis}
-            placeholder="Diagnóstico emitido por el médico"
-            placeholderTextColor={Colors.textMuted}
-            multiline
-            textAlignVertical="top"
-          />
-        </Field>
-
-        <Field label="Observaciones">
-          <TextInput
-            style={[styles.input, styles.multiline, { height: 64 }]}
-            value={notes}
-            onChangeText={setNotes}
-            placeholder="Notas adicionales"
-            placeholderTextColor={Colors.textMuted}
-            multiline
-            textAlignVertical="top"
-          />
-        </Field>
-
-        {/* ── Vitals section ── */}
         <TouchableOpacity
-          style={styles.vitalsToggle}
-          onPress={() => setShowVitals(v => !v)}
+          style={styles.optionalToggle}
+          onPress={() => setShowOptionalDetails((value) => !value)}
           activeOpacity={0.75}
         >
-          <Text style={styles.vitalsToggleLabel}>Signos Vitales</Text>
-          <Text style={styles.vitalsToggleIcon}>{showVitals ? '▲' : '▼'}</Text>
+          <View style={styles.optionalToggleCopy}>
+            <Text style={styles.optionalToggleTitle}>Detalles opcionales</Text>
+            <Text style={styles.optionalToggleHint}>
+              {isExpressSchedule
+                ? 'Diagnóstico, observaciones y signos vitales se pueden completar después.'
+                : 'Abre esta sección si quieres registrar más contexto clínico.'}
+            </Text>
+          </View>
+          <Text style={styles.vitalsToggleIcon}>{showOptionalDetails ? '▲' : '▼'}</Text>
         </TouchableOpacity>
 
-        {showVitals && (
-          <View style={styles.vitalsContainer}>
-            <Field label="Peso (kg)">
+        {showOptionalDetails && (
+          <>
+            <Field label="Diagnóstico">
               <TextInput
-                style={styles.input}
-                value={weightKg}
-                onChangeText={setWeightKg}
-                placeholder="Ej: 68.5"
+                style={[styles.input, styles.multiline, { height: 80 }]}
+                value={diagnosis}
+                onChangeText={setDiagnosis}
+                placeholder="Diagnóstico emitido por el médico"
                 placeholderTextColor={Colors.textMuted}
-                keyboardType="numeric"
+                multiline
+                textAlignVertical="top"
               />
             </Field>
 
-            <Field label="Talla (cm)">
+            <Field label="Observaciones">
               <TextInput
-                style={styles.input}
-                value={heightCm}
-                onChangeText={setHeightCm}
-                placeholder="Ej: 170"
+                style={[styles.input, styles.multiline, { height: 64 }]}
+                value={notes}
+                onChangeText={setNotes}
+                placeholder="Notas adicionales"
                 placeholderTextColor={Colors.textMuted}
-                keyboardType="numeric"
+                multiline
+                textAlignVertical="top"
               />
             </Field>
 
-            <Field label="Temperatura (°C)">
-              <TextInput
-                style={styles.input}
-                value={temperatureC}
-                onChangeText={setTemperatureC}
-                placeholder="Ej: 36.5"
-                placeholderTextColor={Colors.textMuted}
-                keyboardType="numeric"
-              />
-            </Field>
+            {/* ── Vitals section ── */}
+            <TouchableOpacity
+              style={styles.vitalsToggle}
+              onPress={() => setShowVitals(v => !v)}
+              activeOpacity={0.75}
+            >
+              <Text style={styles.vitalsToggleLabel}>Signos Vitales</Text>
+              <Text style={styles.vitalsToggleIcon}>{showVitals ? '▲' : '▼'}</Text>
+            </TouchableOpacity>
 
-            <Field label="Tensión arterial (ej: 120/80)">
-              <TextInput
-                style={styles.input}
-                value={bloodPressure}
-                onChangeText={setBloodPressure}
-                placeholder="120/80"
-                placeholderTextColor={Colors.textMuted}
-                autoCapitalize="none"
-              />
-            </Field>
+            {showVitals && (
+              <View style={styles.vitalsContainer}>
+                <Field label="Peso (kg)">
+                  <TextInput
+                    style={styles.input}
+                    value={weightKg}
+                    onChangeText={setWeightKg}
+                    placeholder="Ej: 68.5"
+                    placeholderTextColor={Colors.textMuted}
+                    keyboardType="numeric"
+                  />
+                </Field>
 
-            <Field label="Frecuencia cardíaca (lpm)">
-              <TextInput
-                style={styles.input}
-                value={heartRate}
-                onChangeText={setHeartRate}
-                placeholder="Ej: 72"
-                placeholderTextColor={Colors.textMuted}
-                keyboardType="numeric"
-              />
-            </Field>
-          </View>
+                <Field label="Talla (cm)">
+                  <TextInput
+                    style={styles.input}
+                    value={heightCm}
+                    onChangeText={setHeightCm}
+                    placeholder="Ej: 170"
+                    placeholderTextColor={Colors.textMuted}
+                    keyboardType="numeric"
+                  />
+                </Field>
+
+                <Field label="Temperatura (°C)">
+                  <TextInput
+                    style={styles.input}
+                    value={temperatureC}
+                    onChangeText={setTemperatureC}
+                    placeholder="Ej: 36.5"
+                    placeholderTextColor={Colors.textMuted}
+                    keyboardType="numeric"
+                  />
+                </Field>
+
+                <Field label="Tensión arterial (ej: 120/80)">
+                  <TextInput
+                    style={styles.input}
+                    value={bloodPressure}
+                    onChangeText={setBloodPressure}
+                    placeholder="120/80"
+                    placeholderTextColor={Colors.textMuted}
+                    autoCapitalize="none"
+                  />
+                </Field>
+
+                <Field label="Frecuencia cardíaca (lpm)">
+                  <TextInput
+                    style={styles.input}
+                    value={heartRate}
+                    onChangeText={setHeartRate}
+                    placeholder="Ej: 72"
+                    placeholderTextColor={Colors.textMuted}
+                    keyboardType="numeric"
+                  />
+                </Field>
+              </View>
+            )}
+          </>
         )}
 
         {/* ── Save button ── */}
@@ -438,7 +732,7 @@ export default function AddVisitScreen() {
           {saving ? (
             <ActivityIndicator color={Colors.white} />
           ) : (
-            <Text style={styles.saveBtnText}>Guardar visita</Text>
+            <Text style={styles.saveBtnText}>{isExpressSchedule ? 'Programar cita' : 'Guardar visita'}</Text>
           )}
         </TouchableOpacity>
         </ScrollView>
@@ -582,6 +876,117 @@ const styles = StyleSheet.create({
     fontSize: Typography.sm,
     lineHeight: 20,
   },
+  autocompleteWrap: {
+    position: 'relative',
+  },
+  autocompleteList: {
+    marginTop: Spacing.xs,
+    backgroundColor: Colors.surface,
+    borderRadius: Radius.md,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    overflow: 'hidden',
+  },
+  autocompleteItem: {
+    paddingHorizontal: Spacing.base,
+    paddingVertical: Spacing.sm,
+    borderBottomWidth: 1,
+    borderBottomColor: Colors.border,
+    gap: 2,
+  },
+  autocompleteTitle: {
+    color: Colors.textPrimary,
+    fontSize: Typography.sm,
+    fontWeight: Typography.medium,
+  },
+  autocompleteMeta: {
+    color: Colors.textMuted,
+    fontSize: Typography.xs,
+  },
+  directoryAssistCard: {
+    backgroundColor: Colors.surface,
+    borderRadius: Radius.md,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    padding: Spacing.base,
+    gap: Spacing.sm,
+    marginBottom: Spacing.base,
+  },
+  directoryAssistHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: Spacing.sm,
+  },
+  directoryAssistCopy: {
+    flex: 1,
+    gap: 4,
+  },
+  directoryAssistTitle: {
+    color: Colors.textPrimary,
+    fontSize: Typography.base,
+    fontWeight: Typography.semibold,
+  },
+  directoryAssistText: {
+    color: Colors.textSecondary,
+    fontSize: Typography.sm,
+    lineHeight: 18,
+  },
+  directoryAssistAction: {
+    backgroundColor: Colors.primary + '18',
+    borderRadius: Radius.md,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.sm,
+  },
+  directoryAssistActionText: {
+    color: Colors.primary,
+    fontSize: Typography.sm,
+    fontWeight: Typography.semibold,
+  },
+  favoriteStateRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.sm,
+  },
+  favoriteStateText: {
+    color: Colors.textSecondary,
+    fontSize: Typography.sm,
+  },
+  favoriteErrorText: {
+    color: Colors.warning,
+    fontSize: Typography.sm,
+    lineHeight: 18,
+  },
+  favoriteChipList: {
+    gap: Spacing.sm,
+  },
+  favoriteChip: {
+    backgroundColor: Colors.background,
+    borderRadius: Radius.md,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.sm,
+    gap: 2,
+  },
+  favoriteChipActive: {
+    borderColor: Colors.primary,
+    backgroundColor: Colors.primary + '14',
+  },
+  favoriteChipTitle: {
+    color: Colors.textPrimary,
+    fontSize: Typography.sm,
+    fontWeight: Typography.medium,
+  },
+  favoriteChipTitleActive: {
+    color: Colors.primary,
+  },
+  favoriteChipMeta: {
+    color: Colors.textMuted,
+    fontSize: Typography.xs,
+  },
+  favoriteChipMetaActive: {
+    color: Colors.textSecondary,
+  },
   input: {
     backgroundColor: Colors.surface,
     borderWidth: 1,
@@ -594,6 +999,33 @@ const styles = StyleSheet.create({
   },
   multiline: {
     paddingTop: Spacing.md,
+  },
+  optionalToggle: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: Spacing.sm,
+    backgroundColor: Colors.surface,
+    borderRadius: Radius.md,
+    paddingHorizontal: Spacing.base,
+    paddingVertical: Spacing.md,
+    marginBottom: Spacing.base,
+    borderWidth: 1,
+    borderColor: Colors.border,
+  },
+  optionalToggleCopy: {
+    flex: 1,
+    gap: 4,
+  },
+  optionalToggleTitle: {
+    color: Colors.textPrimary,
+    fontSize: Typography.base,
+    fontWeight: Typography.semibold,
+  },
+  optionalToggleHint: {
+    color: Colors.textSecondary,
+    fontSize: Typography.sm,
+    lineHeight: 18,
   },
 
   // Vitals toggle

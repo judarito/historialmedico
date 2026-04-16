@@ -14,9 +14,10 @@ App móvil de historial médico familiar con IA. Permite registrar visitas, medi
 2. **Al terminar cada tarea**, incluir tabla de acciones pendientes con archivo y comando exacto.
 3. **Nunca exponer** `SUPABASE_SERVICE_ROLE_KEY` en el cliente móvil ni en edge functions que usen JWT de usuario. Usar `SUPABASE_ANON_KEY` + `Authorization: Bearer <jwt>`.
 4. **Siempre respetar multi-tenancy**: todas las queries filtran por `tenant_id`. Nunca omitir este campo en inserts.
-5. **Migraciones numeradas**: el próximo número es **040**.
+5. **Migraciones numeradas**: el próximo número es **041**.
 6. **Edge Functions desplegadas desde Dashboard deben ser autocontenidas**: evitar imports locales tipo `../_shared/*` porque el bundler web puede subir solo `source/index.ts` y romper con `Module not found`.
 7. **`.env.example` solo puede contener placeholders**. Nunca dejar API keys reales en archivos versionados, ejemplos, docs o comandos.
+8. **Cada cambio funcional debe actualizar el contexto** en `CLAUDE.md` y/o `docs/*.md` dentro de la misma tarea.
 
 ---
 
@@ -92,9 +93,10 @@ src/app/
 └── (app)/                       # Requiere sesión activa
     ├── _layout.tsx              # Verifica auth, carga tenant
     ├── search.tsx               # Búsqueda global híbrida: fallback local + search-ai + fallback RPC; el agente del historial se ejecuta solo por CTA explícita
-    ├── doctor-directory.tsx     # Directorio médico externo: REPS + Google Places + cache compartido; soporta acceso directo a guardados, badges por fuente y crear visitas desde la búsqueda
+    ├── doctor-directory.tsx     # Directorio médico externo: REPS + Google Places + cache compartido; soporta acceso directo a guardados, badges por fuente y crear visitas desde la búsqueda sin perder el contexto de add-visit
     ├── doctor-place/[id].tsx    # Ficha detallada de un lugar médico externo (teléfono/web/horarios on-demand) + CTA para crear visita
-    ├── add-visit.tsx            # Formulario nueva visita + botón voz en header; acepta prefill desde directorio médico y selección de familiar si no viene uno fijo
+    ├── add-visit.tsx            # Formulario nueva visita/cita + botón voz en header; soporta modo express, autocompleta médico desde favoritos y puede abrir el directorio sin perder el formulario
+    ├── appointments.tsx         # Agenda / scheduler de citas futuras con filtros por día y CTA para agendar cita express
     ├── confirm-scan.tsx         # Revisión y confirmación de fórmula procesada por IA
     ├── edit-member.tsx          # Editar datos de un miembro
     ├── history.tsx              # Historial por miembro: fallback local + RPC + expansión IA
@@ -102,14 +104,14 @@ src/app/
     ├── member/emergency-card.tsx # Tarjeta de emergencia con QR; genera token vía generate_share_token
     ├── member/share-history.tsx # Genera link de historial compartido con selector TTL (24h/48h/7d) + QR + copiar
     ├── notifications.tsx        # Campanita / inbox de notificaciones con realtime
-    ├── visit/[id].tsx           # Detalle de visita (datos, vitales, medicamentos/exámenes derivados, documentos adjuntos + preview imagen/audio original; permite reprogramar citas futuras y editar/inferir diagnóstico)
+    ├── visit/[id].tsx           # Detalle de visita (datos, vitales, medicamentos/exámenes derivados, documentos adjuntos + preview imagen/audio original; permite reprogramar citas futuras, dictar al médico por voz y editar/inferir diagnóstico)
     │
     └── (tabs)/                  # Tab bar principal
-        ├── index.tsx            # Dashboard — saludo + stats + familia + barra búsqueda IA + acceso a especialistas guardados
+        ├── index.tsx            # Dashboard — saludo + stats + familia + barra búsqueda IA + acceso a especialistas guardados + accesos rápidos de agenda
         ├── family.tsx           # Lista de miembros familiares
         ├── scan.tsx             # Adjuntar evidencia (foto / galería / voz) — 4 pasos
-        ├── medications.tsx      # Medicamentos activos
-        └── profile.tsx          # Perfil, configuración, acceso compartido y acceso directo al directorio médico guardado
+        ├── medications.tsx      # Medicamentos activos; mantiene estable el familiar seleccionado al entrar por params/notificaciones
+        └── profile.tsx          # Perfil, configuración, acceso compartido, acceso al directorio guardado y logout compatible con web/mobile
 ```
 
 ---
@@ -172,7 +174,7 @@ src/app/
 
 | Componente | Ruta | Descripción |
 |---|---|---|
-| `DatePickerField` | `components/ui/DatePickerField.tsx` | Date/datetime picker nativo. Props: `label`, `value` (ISO), `onChange`, `withTime`, `maximumDate` |
+| `DatePickerField` | `components/ui/DatePickerField.tsx` | Date/datetime picker con fallback editable en web (`date` / `datetime-local`) y picker nativo en móvil. Props: `label`, `value` (ISO), `onChange`, `withTime`, `maximumDate` |
 | `VoiceRecordButton` | `components/ui/VoiceRecordButton.tsx` | Botón mic con STT nativo + grabación de audio original (`expo-av`). Soporta `onTranscription(text)` y `onCapture({ transcription, audioUri })` |
 | `ErrorBoundary` | `components/ErrorBoundary.tsx` | Captura errores React y delega la UI de fallo a `RuntimeDiagnosticsScreen` |
 | `RuntimeDiagnosticsScreen` | `components/RuntimeDiagnosticsScreen.tsx` | Pantalla compartible de diagnóstico: muestra último error real, stack y metadata del arranque |
@@ -191,7 +193,7 @@ src/app/
 |---|---|---|
 | `useAuthStore` | `store/authStore.ts` | `user`, `session`, `initialized` → `init()`, `signIn()`, `signOut()` |
 | `useFamilyStore` | `store/familyStore.ts` | `tenant`, `family`, `members` → `fetchTenantAndFamily()`, `fetchMembers()`; al iniciar sesión también reclama invitaciones pendientes |
-| `useMedicationStore` | `store/medicationStore.ts` | `medications` → `fetchMedications()` |
+| `useMedicationStore` | `store/medicationStore.ts` | `currentMemberId`, `doses`, `activeMeds` → `fetchTodayDoses()`, `fetchActiveMeds()`, `markDose()` |
 | `useNotificationStore` | `store/notificationStore.ts` | `items`, `unreadCount` → feed RPC + realtime sobre `reminders` y `notification_reads` |
 
 ---
@@ -241,7 +243,7 @@ src/app/
 | `038_health_share_tokens.sql` | Tabla `health_share_tokens` para compartir historial; RPC `generate_share_token` (TTL configurable, revoca tokens previos); RPC `get_shared_health_summary` accesible por `anon` sin JWT |
 | `039_preferred_city_and_reps_source.sql` | `profiles.preferred_city_slug` FK a ciudades; `medical_directory_cities.reps_municipality_name`; mapeo de 20 ciudades → nombre exacto en API REPS; columna `source` y `reps_code` en `medical_directory_places`; RPC `get_preferred_city` y `set_preferred_city` |
 
-**Próxima migración:** `040_...sql`
+**Próxima migración:** `041_...sql`
 
 ---
 
@@ -419,6 +421,17 @@ UI de resultados
 - **Onboarding de celular:** `src/app/onboarding/contact.tsx` nuevo paso para guardar `profiles.phone`; `src/utils/authRouting.ts`, `src/app/onboarding/index.tsx` y `src/app/onboarding/member.tsx` ahora lo exigen antes de entrar a tabs.
 - **Twilio / WhatsApp:** `supabase/functions/send-twilio-message/index.ts` ahora consulta el estado posterior del mensaje en Twilio y devuelve `deliveryStatus`, `errorCode` y `errorMessage`; `src/app/(app)/(tabs)/profile.tsx` muestra ese estado real en vez de solo asumir éxito.
 - **Plantillas de WhatsApp:** si el sender sigue en sandbox o si el mensaje inicia conversación fuera de la ventana de 24 horas, hace falta `TWILIO_DEFAULT_WHATSAPP_CONTENT_SID` apuntando a una plantilla `HX...` aprobada para `WhatsApp business initiated`.
+
+## Cambios de hoy (2026-04-16)
+
+- **Logout web/mobile:** `src/app/(app)/(tabs)/profile.tsx` usa confirmación compatible con web (`confirm`) y móvil (`Alert`), limpia stores auxiliares y redirige a login; `src/store/authStore.ts` fuerza `signOut({ scope: 'local' })` para evitar cierres de sesión inconsistentes.
+- **Bienvenida responsive:** `src/screens/WelcomeScreen.tsx` ahora limita la ilustración por ancho y alto de pantalla y usa `ScrollView` de respaldo para que desktop/tablet no tapen los botones inferiores.
+- **Medicamentos sin loop inicial:** `src/app/(app)/(tabs)/medications.tsx` simplificó la sincronización entre foco, params y selección del familiar para evitar recargas repetidas al entrar con el primer miembro.
+- **Agenda y scheduler de citas:** `src/app/(app)/appointments.tsx` agrega una vista agrupada por día para citas futuras; `src/screens/DashboardScreen.tsx` y `src/app/(app)/(tabs)/index.tsx` añaden accesos rápidos `Agendar cita express` y `Ver agenda`.
+- **Cita express:** `src/app/(app)/add-visit.tsx` soporta `mode='schedule'` / `defaultFuture=1`, propone una fecha futura por defecto, limpia el formulario tras guardar y redirige a `appointments` cuando la cita futura se crea desde el flujo express.
+- **DatePicker web:** `src/components/ui/DatePickerField.tsx` usa input HTML (`date` / `datetime-local`) en navegador para que la fecha y hora sean visibles y editables también en PC/tablet.
+- **Autocompletar médico en citas/visitas:** `src/app/(app)/add-visit.tsx` ahora muestra coincidencias de favoritos directamente debajo del campo `Médico` mientras el usuario escribe, y puede abrir `doctor-directory` / `doctor-place/[id]` para buscar un especialista sin perder los datos ya diligenciados de la cita.
+- **Dictado del médico dentro de la visita:** `src/app/(app)/visit/[id].tsx` ahora permite grabar una nota de voz durante la consulta, transcribirla, pasarla por `voice-to-data`, revisar lo extraído y guardar observaciones, medicamentos y exámenes en la visita; `voice-to-data` también extrae terapias y recomendaciones para resumirlas en observaciones.
 
 ## Cambios de hoy (2026-04-01)
 

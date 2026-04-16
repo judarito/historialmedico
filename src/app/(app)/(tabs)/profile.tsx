@@ -17,6 +17,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuthStore } from '../../../store/authStore';
 import { useFamilyStore } from '../../../store/familyStore';
+import { useNotificationStore } from '../../../store/notificationStore';
 import { Avatar } from '../../../components/ui/Avatar';
 import { supabase } from '../../../services/supabase';
 import { sendWhatsAppTestToMyPhone } from '../../../services/twilioMessaging';
@@ -128,9 +129,33 @@ function getSharedAccessErrorMessage(error: { message?: string | null; details?:
   return error?.message ?? 'No pudimos completar la acción.';
 }
 
+function showConfirm(params: {
+  title: string;
+  message: string;
+  confirmLabel?: string;
+  confirmStyle?: 'default' | 'destructive';
+  onConfirm: () => void | Promise<void>;
+}) {
+  const { title, message, confirmLabel = 'Aceptar', confirmStyle = 'destructive', onConfirm } = params;
+
+  if (Platform.OS === 'web') {
+    const accepted = globalThis.confirm?.([title, message].filter(Boolean).join('\n\n')) ?? false;
+    if (accepted) {
+      void onConfirm();
+    }
+    return;
+  }
+
+  Alert.alert(title, message, [
+    { text: 'Cancelar', style: 'cancel' },
+    { text: confirmLabel, style: confirmStyle, onPress: () => { void onConfirm(); } },
+  ]);
+}
+
 export default function ProfileTab() {
   const { user, signOut } = useAuthStore();
   const { tenant, members, reset } = useFamilyStore();
+  const resetNotifications = useNotificationStore((state) => state.reset);
   const [accessMembers, setAccessMembers] = useState<AccessMember[]>([]);
   const [pendingInvitations, setPendingInvitations] = useState<PendingInvitation[]>([]);
   const [loadingAccess, setLoadingAccess] = useState(false);
@@ -150,6 +175,7 @@ export default function ProfileTab() {
   const [loadingPhone, setLoadingPhone] = useState(false);
   const [savingPhone, setSavingPhone] = useState(false);
   const [testingWhatsApp, setTestingWhatsApp] = useState(false);
+  const [signingOut, setSigningOut] = useState(false);
 
   const fullName = user?.user_metadata?.full_name ?? user?.email?.split('@')[0] ?? 'Usuario';
   const email = user?.email ?? '';
@@ -343,34 +369,29 @@ export default function ProfileTab() {
   }
 
   function confirmRevokeMember(member: AccessMember) {
-    Alert.alert(
-      'Revocar acceso',
-      `¿Seguro que quieres quitarle el acceso a ${getDisplayName(member)}? Seguirá existiendo la cuenta, pero ya no verá esta familia.`,
-      [
-        { text: 'Cancelar', style: 'cancel' },
-        {
-          text: 'Revocar',
-          style: 'destructive',
-          onPress: async () => {
-            if (!tenant?.id) return;
-            setMutatingAccessKey(`member-revoke:${member.user_id}`);
-            const { error } = await supabase.rpc('revoke_tenant_user_access', {
-              p_tenant_id: tenant.id,
-              p_user_id: member.user_id,
-            });
-            setMutatingAccessKey(null);
+    showConfirm({
+      title: 'Revocar acceso',
+      message: `¿Seguro que quieres quitarle el acceso a ${getDisplayName(member)}? Seguirá existiendo la cuenta, pero ya no verá esta familia.`,
+      confirmLabel: 'Revocar',
+      confirmStyle: 'destructive',
+      onConfirm: async () => {
+        if (!tenant?.id) return;
+        setMutatingAccessKey(`member-revoke:${member.user_id}`);
+        const { error } = await supabase.rpc('revoke_tenant_user_access', {
+          p_tenant_id: tenant.id,
+          p_user_id: member.user_id,
+        });
+        setMutatingAccessKey(null);
 
-            if (error) {
-              Alert.alert('No pudimos revocar el acceso', getSharedAccessErrorMessage(error));
-              return;
-            }
+        if (error) {
+          Alert.alert('No pudimos revocar el acceso', getSharedAccessErrorMessage(error));
+          return;
+        }
 
-            await loadAccessData();
-            Alert.alert('Acceso revocado', `${getDisplayName(member)} ya no puede entrar a esta familia.`);
-          },
-        },
-      ]
-    );
+        await loadAccessData();
+        Alert.alert('Acceso revocado', `${getDisplayName(member)} ya no puede entrar a esta familia.`);
+      },
+    });
   }
 
   async function handleUpdateInvitationRole(invitation: PendingInvitation, nextRole: TenantUserRole) {
@@ -391,32 +412,27 @@ export default function ProfileTab() {
   }
 
   function confirmCancelInvitation(invitation: PendingInvitation) {
-    Alert.alert(
-      'Cancelar invitación',
-      `¿Seguro que quieres cancelar la invitación pendiente para ${invitation.email}?`,
-      [
-        { text: 'Conservar', style: 'cancel' },
-        {
-          text: 'Cancelar invitación',
-          style: 'destructive',
-          onPress: async () => {
-            setMutatingAccessKey(`invitation-cancel:${invitation.invitation_id}`);
-            const { error } = await supabase.rpc('cancel_tenant_invitation', {
-              p_invitation_id: invitation.invitation_id,
-            });
-            setMutatingAccessKey(null);
+    showConfirm({
+      title: 'Cancelar invitación',
+      message: `¿Seguro que quieres cancelar la invitación pendiente para ${invitation.email}?`,
+      confirmLabel: 'Cancelar invitación',
+      confirmStyle: 'destructive',
+      onConfirm: async () => {
+        setMutatingAccessKey(`invitation-cancel:${invitation.invitation_id}`);
+        const { error } = await supabase.rpc('cancel_tenant_invitation', {
+          p_invitation_id: invitation.invitation_id,
+        });
+        setMutatingAccessKey(null);
 
-            if (error) {
-              Alert.alert('No pudimos cancelar la invitación', getSharedAccessErrorMessage(error));
-              return;
-            }
+        if (error) {
+          Alert.alert('No pudimos cancelar la invitación', getSharedAccessErrorMessage(error));
+          return;
+        }
 
-            await loadAccessData();
-            Alert.alert('Invitación cancelada', `La invitación pendiente para ${invitation.email} fue cancelada.`);
-          },
-        },
-      ]
-    );
+        await loadAccessData();
+        Alert.alert('Invitación cancelada', `La invitación pendiente para ${invitation.email} fue cancelada.`);
+      },
+    });
   }
 
   async function handleSaveCity(slug: string | null) {
@@ -492,18 +508,24 @@ export default function ProfileTab() {
   }
 
   async function handleSignOut() {
-    Alert.alert('Cerrar sesión', '¿Estás seguro de que quieres salir?', [
-      { text: 'Cancelar', style: 'cancel' },
-      {
-        text: 'Salir',
-        style: 'destructive',
-        onPress: async () => {
+    showConfirm({
+      title: 'Cerrar sesión',
+      message: '¿Estás seguro de que quieres salir?',
+      confirmLabel: 'Salir',
+      confirmStyle: 'destructive',
+      onConfirm: async () => {
+        if (signingOut) return;
+        setSigningOut(true);
+        try {
           await signOut();
+          resetNotifications();
           reset();
-          router.replace('/');
-        },
+          router.replace('/login');
+        } finally {
+          setSigningOut(false);
+        }
       },
-    ]);
+    });
   }
 
   return (
@@ -942,9 +964,14 @@ export default function ProfileTab() {
           />
         </Section>
 
-        <TouchableOpacity style={styles.signOutBtn} onPress={handleSignOut} activeOpacity={0.8}>
+        <TouchableOpacity
+          style={[styles.signOutBtn, signingOut && styles.signOutBtnDisabled]}
+          onPress={handleSignOut}
+          activeOpacity={0.8}
+          disabled={signingOut}
+        >
           <Ionicons name="log-out-outline" size={20} color={Colors.alert} />
-          <Text style={styles.signOutText}>Cerrar sesión</Text>
+          <Text style={styles.signOutText}>{signingOut ? 'Cerrando sesión...' : 'Cerrar sesión'}</Text>
         </TouchableOpacity>
 
           <Text style={styles.version}>Family Health Tracker IA v1.0.0</Text>
@@ -1332,6 +1359,9 @@ const styles = StyleSheet.create({
     borderRadius: Radius.lg,
     borderWidth: 1,
     borderColor: Colors.alert + '44',
+  },
+  signOutBtnDisabled: {
+    opacity: 0.65,
   },
   signOutText: {
     color: Colors.alert,

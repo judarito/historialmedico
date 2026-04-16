@@ -21,8 +21,17 @@ import { Audio } from 'expo-av';
 import { supabase } from '../../../services/supabase';
 import { Colors, Typography, Spacing, Radius, Shadow } from '../../../theme';
 import type { Database } from '../../../types/database.types';
-import { formatCalendarDate, toInputValue, toStoredIso } from '../../../utils';
+import {
+  buildMedicalVisitUpdate,
+  formatCalendarDate,
+  getVisitReviewItems,
+  getVitalsReviewItems,
+  normalizeExtractedVisitData,
+  toInputValue,
+  toStoredIso,
+} from '../../../utils';
 import { DatePickerField } from '../../../components/ui/DatePickerField';
+import { VoiceRecordButton, type VoiceCapturePayload } from '../../../components/ui/VoiceRecordButton';
 
 type MedicalVisit   = Database['public']['Tables']['medical_visits']['Row'];
 type MedicalDocument = Database['public']['Tables']['medical_documents']['Row'];
@@ -43,6 +52,30 @@ type CascadeDeleteResult = {
   deleted_schedules?: number | null;
   deleted_tests?: number | null;
   deleted_reminders?: number | null;
+};
+
+type VoiceExtractedMedication = {
+  medication_name?: string | null;
+  dose_amount?: number | string | null;
+  dose_unit?: string | null;
+  frequency_text?: string | null;
+  interval_hours?: number | string | null;
+  duration_days?: number | string | null;
+  route?: string | null;
+  instructions?: string | null;
+};
+
+type VoiceExtractedTest = {
+  test_name?: string | null;
+  category?: string | null;
+  instructions?: string | null;
+};
+
+type VoiceExtractedTherapy = {
+  therapy_name?: string | null;
+  frequency_text?: string | null;
+  duration_days?: number | string | null;
+  instructions?: string | null;
 };
 
 const STATUS_LABEL: Record<string, { label: string; color: string; icon: any }> = {
@@ -130,6 +163,53 @@ function showConfirm(params: {
   ]);
 }
 
+function normalizeText(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+}
+
+function mergeTextBlocks(...values: Array<string | null | undefined>): string | null {
+  const unique = values
+    .map((value) => normalizeText(value))
+    .filter(Boolean)
+    .filter((value, index, array) => array.indexOf(value) === index) as string[];
+
+  return unique.length > 0 ? unique.join('\n\n') : null;
+}
+
+function normalizeVoiceMedications(value: unknown): VoiceExtractedMedication[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is VoiceExtractedMedication => Boolean(normalizeText((item as VoiceExtractedMedication)?.medication_name)));
+}
+
+function normalizeVoiceTests(value: unknown): VoiceExtractedTest[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is VoiceExtractedTest => Boolean(normalizeText((item as VoiceExtractedTest)?.test_name)));
+}
+
+function normalizeVoiceTherapies(value: unknown): VoiceExtractedTherapy[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is VoiceExtractedTherapy => Boolean(normalizeText((item as VoiceExtractedTherapy)?.therapy_name)));
+}
+
+function buildTherapiesSummary(therapies: VoiceExtractedTherapy[]): string | null {
+  if (therapies.length === 0) return null;
+
+  const lines = therapies.map((therapy) => {
+    const parts = [
+      normalizeText(therapy.therapy_name),
+      normalizeText(therapy.frequency_text),
+      therapy.duration_days ? `${therapy.duration_days} día(s)` : null,
+      normalizeText(therapy.instructions),
+    ].filter(Boolean);
+
+    return parts.join(' · ');
+  }).filter(Boolean);
+
+  return lines.length > 0 ? `Terapias / recomendaciones terapéuticas:\n- ${lines.join('\n- ')}` : null;
+}
+
 function isMissingRpc(error: { message?: string | null; details?: string | null } | null): boolean {
   const haystack = `${error?.message ?? ''} ${error?.details ?? ''}`.toLowerCase();
   return (
@@ -173,6 +253,12 @@ export default function VisitDetailRoute() {
   const [editDiagnosis, setEditDiagnosis] = useState('');
   const [savingVisitEdit, setSavingVisitEdit] = useState(false);
   const [inferringDiagnosis, setInferringDiagnosis] = useState(false);
+  const [processingDoctorVoice, setProcessingDoctorVoice] = useState(false);
+  const [savingDoctorVoice, setSavingDoctorVoice] = useState(false);
+  const [doctorVoiceModalVisible, setDoctorVoiceModalVisible] = useState(false);
+  const [doctorVoiceTranscript, setDoctorVoiceTranscript] = useState('');
+  const [doctorVoiceAudioUri, setDoctorVoiceAudioUri] = useState<string | null>(null);
+  const [doctorVoiceStructured, setDoctorVoiceStructured] = useState<Record<string, unknown> | null>(null);
 
   // Recargar al volver del scan (después de adjuntar un documento)
   useFocusEffect(useCallback(() => { load(); }, [id]));
@@ -255,6 +341,166 @@ export default function VisitDetailRoute() {
   function closeEditVisitModal() {
     if (savingVisitEdit || inferringDiagnosis) return;
     setEditModalVisible(false);
+  }
+
+  function resetDoctorVoiceDraft() {
+    setDoctorVoiceTranscript('');
+    setDoctorVoiceAudioUri(null);
+    setDoctorVoiceStructured(null);
+  }
+
+  function closeDoctorVoiceModal() {
+    if (processingDoctorVoice || savingDoctorVoice) return;
+    setDoctorVoiceModalVisible(false);
+    resetDoctorVoiceDraft();
+  }
+
+  async function handleDoctorVoiceCapture(payload: VoiceCapturePayload) {
+    const transcript = payload.transcription.trim();
+    if (!transcript) {
+      showAlert('Sin transcripción', 'No logramos convertir la voz en texto. Intenta de nuevo más cerca del médico o con menos ruido.');
+      return;
+    }
+
+    setProcessingDoctorVoice(true);
+    try {
+      const { data, error } = await supabase.functions.invoke('voice-to-data', {
+        body: { transcription: transcript, context: 'visit' },
+      });
+
+      if (error || !data) {
+        showAlert('No se pudo procesar', error?.message ?? 'La nota de voz no pudo analizarse.');
+        return;
+      }
+
+      setDoctorVoiceTranscript(transcript);
+      setDoctorVoiceAudioUri(payload.audioUri);
+      setDoctorVoiceStructured((data.structured as Record<string, unknown> | null) ?? null);
+      setDoctorVoiceModalVisible(true);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'No se pudo procesar la nota de voz.';
+      showAlert('No se pudo procesar', message);
+    } finally {
+      setProcessingDoctorVoice(false);
+    }
+  }
+
+  async function saveDoctorVoiceCapture() {
+    if (!visit) return;
+
+    setSavingDoctorVoice(true);
+    try {
+      const { data: authData, error: authError } = await supabase.auth.getUser();
+      if (authError || !authData.user) {
+        throw new Error('No hay una sesión activa para guardar esta nota de voz.');
+      }
+
+      let audioFilePath = '';
+      let audioMimeType: string | null = null;
+      let audioSizeBytes: number | null = null;
+
+      if (doctorVoiceAudioUri) {
+        const extensionMatch = doctorVoiceAudioUri.split('?')[0].match(/\.([a-zA-Z0-9]+)$/);
+        const extension = (extensionMatch?.[1] ?? 'm4a').toLowerCase();
+        audioMimeType = extension === 'webm' ? 'audio/webm' : 'audio/mp4';
+        audioFilePath = `${visit.tenant_id}/${visit.family_id}/${visit.family_member_id}/voice-visit-${visit.id}-${Date.now()}.${extension}`;
+
+        const response = await fetch(doctorVoiceAudioUri);
+        const arrayBuffer = await response.arrayBuffer();
+        audioSizeBytes = arrayBuffer.byteLength;
+
+        const { error: uploadError } = await supabase.storage
+          .from('medical-documents')
+          .upload(audioFilePath, new Uint8Array(arrayBuffer), {
+            contentType: audioMimeType,
+            upsert: false,
+          });
+
+        if (uploadError) {
+          throw new Error(uploadError.message);
+        }
+      }
+
+      const normalizedVisitData = normalizeExtractedVisitData(doctorVoiceStructured as Record<string, unknown> | null);
+      const voiceMedications = normalizeVoiceMedications(doctorVoiceStructured?.medications);
+      const voiceTests = normalizeVoiceTests(doctorVoiceStructured?.tests);
+      const voiceTherapies = normalizeVoiceTherapies(doctorVoiceStructured?.therapies);
+      const therapiesSummary = buildTherapiesSummary(voiceTherapies);
+      const visitUpdates = buildMedicalVisitUpdate(normalizedVisitData, { includeVisitDate: false });
+      const mergedNotes = mergeTextBlocks(visit.notes, normalizedVisitData.notes, therapiesSummary);
+      const mergedVoiceText = mergeTextBlocks(visit.voice_note_text, doctorVoiceTranscript);
+      const recordedAt = new Date().toISOString();
+
+      const { error: visitError } = await supabase
+        .from('medical_visits')
+        .update({
+          ...visitUpdates,
+          notes: mergedNotes,
+          voice_note_text: mergedVoiceText,
+        })
+        .eq('id', visit.id);
+
+      if (visitError) {
+        throw new Error(visitError.message);
+      }
+
+      const { data: documentData, error: documentError } = await supabase
+        .from('medical_documents')
+        .insert({
+          tenant_id: visit.tenant_id,
+          family_id: visit.family_id,
+          family_member_id: visit.family_member_id,
+          medical_visit_id: visit.id,
+          document_type: 'voice_note',
+          title: `Nota del médico ${formatCalendarDate(visit.visit_date)}`,
+          file_path: audioFilePath,
+          mime_type: audioMimeType,
+          file_size_bytes: audioSizeBytes,
+          captured_at: recordedAt,
+          extracted_text: doctorVoiceTranscript,
+          parsed_json: doctorVoiceStructured ?? null,
+          ai_model: 'deepseek-chat',
+          processing_status: 'processed',
+          verified_by_user: true,
+          created_by: authData.user.id,
+        })
+        .select('id')
+        .single();
+
+      if (documentError || !documentData?.id) {
+        throw new Error(documentError?.message ?? 'No se pudo crear el adjunto de voz.');
+      }
+
+      if (voiceMedications.length > 0 || voiceTests.length > 0) {
+        const { error: confirmError } = await supabase.rpc('confirm_document_and_create_records', {
+          p_document_id: documentData.id,
+          p_medications: voiceMedications as unknown as Database['public']['Functions']['confirm_document_and_create_records']['Args']['p_medications'],
+          p_tests: voiceTests as unknown as Database['public']['Functions']['confirm_document_and_create_records']['Args']['p_tests'],
+        });
+
+        if (confirmError) {
+          throw new Error(confirmError.message);
+        }
+      }
+
+      setDoctorVoiceModalVisible(false);
+      resetDoctorVoiceDraft();
+      await load();
+
+      const summaryParts = [
+        'La observación por voz quedó vinculada a la visita.',
+        voiceMedications.length > 0 ? `Medicamentos creados: ${voiceMedications.length}.` : null,
+        voiceTests.length > 0 ? `Exámenes creados: ${voiceTests.length}.` : null,
+        voiceTherapies.length > 0 ? 'Las terapias quedaron resumidas en observaciones.' : null,
+      ].filter(Boolean);
+
+      showAlert('Nota del médico guardada', summaryParts.join(' '));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'No se pudo guardar la nota del médico.';
+      showAlert('No se pudo guardar', message);
+    } finally {
+      setSavingDoctorVoice(false);
+    }
   }
 
   async function inferDiagnosisWithAI() {
@@ -1015,6 +1261,11 @@ export default function VisitDetailRoute() {
   const canEditDiagnosis = visit.status !== 'scheduled';
   const canEditVisit = true;
   const editVisitLabel = isScheduledVisit ? 'Editar cita' : 'Editar visita';
+  const doctorVoiceVisitItems = getVisitReviewItems(doctorVoiceStructured as Record<string, unknown> | null);
+  const doctorVoiceVitalItems = getVitalsReviewItems(doctorVoiceStructured as Record<string, unknown> | null);
+  const doctorVoiceMedications = normalizeVoiceMedications(doctorVoiceStructured?.medications);
+  const doctorVoiceTests = normalizeVoiceTests(doctorVoiceStructured?.tests);
+  const doctorVoiceTherapies = normalizeVoiceTherapies(doctorVoiceStructured?.therapies);
 
   return (
     <SafeAreaView style={styles.safe}>
@@ -1168,6 +1419,31 @@ export default function VisitDetailRoute() {
             </View>
           </View>
         )}
+
+        <View style={styles.section}>
+          <View style={styles.sectionHeader}>
+            <Text style={styles.sectionTitle}>Consulta por voz</Text>
+            {processingDoctorVoice ? <ActivityIndicator color={Colors.primary} size="small" /> : null}
+          </View>
+          <View style={styles.voiceCaptureCard}>
+            <Text style={styles.voiceCaptureText}>
+              Activa el micrófono mientras hablas con el médico para capturar la consulta, convertirla en texto y extraer medicamentos, exámenes y recomendaciones.
+            </Text>
+            <View style={styles.voiceCaptureActions}>
+              <VoiceRecordButton
+                size={60}
+                onCapture={(payload) => { void handleDoctorVoiceCapture(payload); }}
+                disabled={processingDoctorVoice || savingDoctorVoice}
+              />
+              <View style={styles.voiceCaptureCopy}>
+                <Text style={styles.voiceCaptureTitle}>Nueva nota del médico</Text>
+                <Text style={styles.voiceCaptureHint}>
+                  Al terminar, podrás revisar la transcripción antes de guardarla en esta visita.
+                </Text>
+              </View>
+            </View>
+          </View>
+        </View>
 
         {/* ── Signos vitales ── */}
         {hasVitals(visit) && (
@@ -1399,6 +1675,149 @@ export default function VisitDetailRoute() {
 
         <View style={{ height: Spacing.xxxl }} />
       </ScrollView>
+
+      <Modal
+        visible={doctorVoiceModalVisible}
+        animationType="slide"
+        transparent
+        onRequestClose={closeDoctorVoiceModal}
+      >
+        <KeyboardAvoidingView
+          style={styles.editOverlay}
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        >
+          <View style={styles.editSheet}>
+            <View style={styles.previewHeader}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.previewTitle}>Nota del médico</Text>
+                <Text style={styles.previewSubtitle}>
+                  {visitMemberName ?? 'Visita médica'}
+                </Text>
+              </View>
+              <TouchableOpacity
+                style={styles.backBtn}
+                onPress={closeDoctorVoiceModal}
+                disabled={savingDoctorVoice || processingDoctorVoice}
+              >
+                <Ionicons name="close" size={22} color={Colors.textPrimary} />
+              </TouchableOpacity>
+            </View>
+
+            <ScrollView
+              contentContainerStyle={styles.editContent}
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator={false}
+            >
+              <View style={styles.transcriptBox}>
+                <View style={styles.transcriptHeader}>
+                  <Ionicons name="mic" size={14} color={Colors.primary} />
+                  <Text style={styles.transcriptLabel}>Transcripción</Text>
+                </View>
+                <Text style={styles.transcriptText}>{doctorVoiceTranscript}</Text>
+              </View>
+
+              {doctorVoiceVisitItems.length > 0 && (
+                <View style={styles.extractedCard}>
+                  <Text style={styles.extractedTitle}>Datos detectados de la visita</Text>
+                  {doctorVoiceVisitItems.map((item) => (
+                    <View key={item.label} style={styles.extractedRow}>
+                      <Text style={styles.extractedLabel}>{item.label}</Text>
+                      <Text style={styles.extractedValue}>{item.value}</Text>
+                    </View>
+                  ))}
+                </View>
+              )}
+
+              {doctorVoiceVitalItems.length > 0 && (
+                <View style={styles.extractedCard}>
+                  <Text style={styles.extractedTitle}>Signos vitales detectados</Text>
+                  {doctorVoiceVitalItems.map((item) => (
+                    <View key={item.label} style={styles.extractedRow}>
+                      <Text style={styles.extractedLabel}>{item.label}</Text>
+                      <Text style={styles.extractedValue}>{item.value}</Text>
+                    </View>
+                  ))}
+                </View>
+              )}
+
+              {doctorVoiceMedications.length > 0 && (
+                <View style={styles.extractedCard}>
+                  <Text style={styles.extractedTitle}>Medicamentos ({doctorVoiceMedications.length})</Text>
+                  {doctorVoiceMedications.map((item, index) => (
+                    <View key={`${item.medication_name ?? 'med'}-${index}`} style={styles.medRow}>
+                      <Ionicons name="medkit-outline" size={14} color={Colors.healthy} />
+                      <Text style={styles.medRowText}>
+                        {item.medication_name}
+                        {item.dose_amount ? ` ${item.dose_amount}${item.dose_unit ?? ''}` : ''}
+                        {item.frequency_text ? ` · ${item.frequency_text}` : ''}
+                      </Text>
+                    </View>
+                  ))}
+                </View>
+              )}
+
+              {doctorVoiceTests.length > 0 && (
+                <View style={styles.extractedCard}>
+                  <Text style={styles.extractedTitle}>Exámenes ({doctorVoiceTests.length})</Text>
+                  {doctorVoiceTests.map((item, index) => (
+                    <View key={`${item.test_name ?? 'test'}-${index}`} style={styles.medRow}>
+                      <Ionicons name="flask-outline" size={14} color={Colors.info} />
+                      <Text style={styles.medRowText}>
+                        {item.test_name}
+                        {item.category ? ` · ${item.category}` : ''}
+                        {item.instructions ? ` · ${item.instructions}` : ''}
+                      </Text>
+                    </View>
+                  ))}
+                </View>
+              )}
+
+              {doctorVoiceTherapies.length > 0 && (
+                <View style={styles.extractedCard}>
+                  <Text style={styles.extractedTitle}>Terapias / recomendaciones ({doctorVoiceTherapies.length})</Text>
+                  {doctorVoiceTherapies.map((item, index) => (
+                    <View key={`${item.therapy_name ?? 'therapy'}-${index}`} style={styles.medRow}>
+                      <Ionicons name="fitness-outline" size={14} color={Colors.warning} />
+                      <Text style={styles.medRowText}>
+                        {item.therapy_name}
+                        {item.frequency_text ? ` · ${item.frequency_text}` : ''}
+                        {item.duration_days ? ` · ${item.duration_days} día(s)` : ''}
+                        {item.instructions ? ` · ${item.instructions}` : ''}
+                      </Text>
+                    </View>
+                  ))}
+                  <Text style={styles.editHelperText}>
+                    Las terapias y recomendaciones se guardarán en observaciones porque aún no existe un módulo estructurado para ellas.
+                  </Text>
+                </View>
+              )}
+            </ScrollView>
+
+            <View style={styles.editActions}>
+              <TouchableOpacity
+                style={styles.editCancelBtn}
+                onPress={closeDoctorVoiceModal}
+                disabled={savingDoctorVoice}
+                activeOpacity={0.8}
+              >
+                <Text style={styles.editCancelBtnText}>Cancelar</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.editSaveBtn, savingDoctorVoice && { opacity: 0.7 }]}
+                onPress={() => { void saveDoctorVoiceCapture(); }}
+                disabled={savingDoctorVoice}
+                activeOpacity={0.8}
+              >
+                {savingDoctorVoice ? (
+                  <ActivityIndicator color={Colors.white} size="small" />
+                ) : (
+                  <Text style={styles.editSaveBtnText}>Guardar nota</Text>
+                )}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
 
       <Modal
         visible={editModalVisible}
@@ -1839,6 +2258,98 @@ const styles = StyleSheet.create({
   section:       { gap: Spacing.sm },
   sectionHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   sectionTitle:  { color: Colors.textPrimary, fontSize: Typography.md, fontWeight: Typography.bold },
+  voiceCaptureCard: {
+    backgroundColor: Colors.surface,
+    borderRadius: Radius.xl,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    padding: Spacing.md,
+    gap: Spacing.md,
+  },
+  voiceCaptureText: {
+    color: Colors.textSecondary,
+    fontSize: Typography.sm,
+    lineHeight: 20,
+  },
+  voiceCaptureActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.md,
+  },
+  voiceCaptureCopy: {
+    flex: 1,
+    gap: 4,
+  },
+  voiceCaptureTitle: {
+    color: Colors.textPrimary,
+    fontSize: Typography.base,
+    fontWeight: Typography.semibold,
+  },
+  voiceCaptureHint: {
+    color: Colors.textMuted,
+    fontSize: Typography.xs,
+    lineHeight: 18,
+  },
+  transcriptBox: {
+    backgroundColor: Colors.surface,
+    borderRadius: Radius.lg,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    padding: Spacing.md,
+    gap: Spacing.sm,
+  },
+  transcriptHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.xs,
+  },
+  transcriptLabel: {
+    color: Colors.primary,
+    fontSize: Typography.sm,
+    fontWeight: Typography.semibold,
+  },
+  transcriptText: {
+    color: Colors.textPrimary,
+    fontSize: Typography.sm,
+    lineHeight: 20,
+  },
+  extractedCard: {
+    backgroundColor: Colors.surface,
+    borderRadius: Radius.lg,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    padding: Spacing.md,
+    gap: Spacing.sm,
+  },
+  extractedTitle: {
+    color: Colors.textPrimary,
+    fontSize: Typography.base,
+    fontWeight: Typography.semibold,
+  },
+  extractedRow: {
+    gap: 2,
+  },
+  extractedLabel: {
+    color: Colors.textMuted,
+    fontSize: Typography.xs,
+    fontWeight: Typography.medium,
+  },
+  extractedValue: {
+    color: Colors.textPrimary,
+    fontSize: Typography.sm,
+    lineHeight: 18,
+  },
+  medRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: Spacing.xs,
+  },
+  medRowText: {
+    flex: 1,
+    color: Colors.textPrimary,
+    fontSize: Typography.sm,
+    lineHeight: 18,
+  },
   addDocBtn:     { flexDirection: 'row', alignItems: 'center', gap: 4 },
   addDocText:    { color: Colors.primary, fontSize: Typography.sm, fontWeight: Typography.semibold },
   sectionLink:   { color: Colors.primaryLight, fontSize: Typography.sm, fontWeight: Typography.semibold },

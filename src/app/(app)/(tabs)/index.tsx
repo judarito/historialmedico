@@ -119,6 +119,8 @@ export default function DashboardTab() {
       onNotifications={() => router.push('/(app)/notifications')}
       onSearch={() => router.push('/(app)/search')}
       onMedicalDirectory={() => router.push({ pathname: '/(app)/doctor-directory', params: { favorites: '1' } })}
+      onQuickSchedule={() => router.push({ pathname: '/(app)/add-visit', params: { mode: 'schedule', defaultFuture: '1' } })}
+      onAppointmentsCalendar={() => router.push('/(app)/appointments')}
     />
   );
 }

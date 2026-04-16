@@ -62,6 +62,7 @@ export default function AppLayout() {
       <Stack.Screen name="history" />
       <Stack.Screen name="edit-member" />
       <Stack.Screen name="visit/[id]" />
+      <Stack.Screen name="appointments" />
       <Stack.Screen name="search" />
       <Stack.Screen name="notifications" />
     </Stack>

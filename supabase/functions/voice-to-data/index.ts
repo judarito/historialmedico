@@ -141,6 +141,9 @@ Si un campo no se menciona, devuelve null para ese campo.
 Extrae solo lo explícitamente dicho o claramente inferible por contexto inmediato.
 Si no se menciona un diagnóstico pero la combinación de motivo, medicamentos y contexto clínico lo orienta, sugiere un diagnóstico breve y prudente, idealmente en formato "Diagnóstico técnico (explicación sencilla)".
 Si aparecen signos vitales, conviértelos a los campos correspondientes y conserva sus unidades correctas.
+ Si aparecen órdenes de exámenes, laboratorios, imágenes o procedimientos diagnósticos, inclúyelos en "tests".
+ Si aparecen terapias, sesiones, rehabilitación, terapia respiratoria, física, ocupacional, fonoaudiología o recomendaciones terapéuticas, inclúyelas en "therapies".
+ Si aparecen indicaciones generales del médico, cuidados en casa o recomendaciones no farmacológicas, inclúyelas en "general_instructions".
 Responde ÚNICAMENTE con JSON válido.`;
 
   const userPrompt = `Transcripción: "${transcription}"
@@ -154,11 +157,27 @@ Extrae los datos en este formato JSON:
   "reason_for_visit": "motivo de consulta o null",
   "diagnosis": "diagnóstico explícito o sugerido de forma prudente; si es sugerido, intenta usar formato 'Diagnóstico técnico (explicación sencilla)', o null",
   "notes": "observaciones adicionales o null",
+  "general_instructions": "recomendaciones del médico, cuidados en casa o indicaciones generales, o null",
   "medications": [
     {
       "medication_name": "",
       "dose_amount": null,
       "dose_unit": "",
+      "frequency_text": "",
+      "duration_days": null,
+      "instructions": ""
+    }
+  ],
+  "tests": [
+    {
+      "test_name": "",
+      "category": "laboratorio | imagen | procedimiento | otro",
+      "instructions": ""
+    }
+  ],
+  "therapies": [
+    {
+      "therapy_name": "",
       "frequency_text": "",
       "duration_days": null,
       "instructions": ""

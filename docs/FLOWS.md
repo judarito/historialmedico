@@ -178,6 +178,7 @@ const { data: visit } = await supabase
 **Notas actuales:**
 - Si `visit_date` queda en el futuro, la app la guarda con `status='scheduled'`.
 - Si la fecha ya paso o es inmediata, se guarda como `status='completed'`.
+- `add-visit` también soporta modo express para citas futuras: propone una fecha futura por defecto y deja diagnóstico/observaciones/signos vitales como detalles opcionales.
 - Las citas futuras generan un reminder automatico en `reminders` y lo veras luego en la campanita.
 - Desde el perfil del miembro, la acción `Dosis hoy` y el enlace `Ver todas las dosis` abren la pestaña de medicamentos enfocada en ese mismo familiar, no en el primero de la familia.
 - Las dosis pendientes tambien generan `reminders` de tipo `medication_dose`; cuando llega la hora, salen en la campanita y como push del celular.
@@ -237,6 +238,7 @@ Usuario                    App movil                 PostgreSQL / Supabase
 - Desde `visit/[id]` la cita programada se puede marcar como realizada o cancelada.
 - Desde `visit/[id]` ahora tambien existen dos niveles de borrado: `Solo ocultar` para soft delete o `Eliminar todo` para limpiar visita, adjuntos y datos derivados.
 - Al tocar una notificación de medicamento, la app abre la pestaña `Medicamentos` filtrada al familiar correcto.
+- Desde `Inicio`, el usuario ahora tiene `Agendar cita express` y `Ver agenda`, y `appointments.tsx` deja revisar citas futuras agrupadas por día como scheduler.
 
 ---
 
@@ -329,6 +331,85 @@ Usuario                 App móvil                 Edge Function                
 - Si `sandbox=true`, el sender sigue siendo `whatsapp:+14155238886` y el número debe haberse unido al sandbox.
 - Si `deliveryStatus='undelivered'` con `errorCode=63016`, Twilio está rechazando el mensaje por intentar iniciar conversación fuera de la ventana permitida sin una plantilla válida.
 - Para ese caso hace falta configurar `TWILIO_DEFAULT_WHATSAPP_CONTENT_SID` con un `HX...` aprobado para `WhatsApp business initiated`.
+
+---
+
+## Flujo 4G: Agenda rápida de citas futuras
+
+```
+Usuario                    Dashboard / Agenda                 Supabase
+   |                              |                              |
+   |-- toca "Agendar..." -------> |-- abre add-visit -----------|
+   |                              |   mode='schedule'           |
+   |                              |   fecha futura sugerida     |
+   |-- confirma datos ----------> |-- INSERT medical_visits --->|
+   |                              |   status='scheduled'        |
+   |                              |<-- ok ----------------------|
+   |<-- vuelve a agenda ----------|                              |
+   |-- toca "Ver agenda" -------> |-- appointments.tsx -------->|
+   |                              |-- SELECT citas futuras ---->|
+   |<-- ve scheduler por día -----|                              |
+```
+
+**Notas actuales:**
+- `appointments.tsx` consulta solo visitas futuras (`status='scheduled'`, `visit_date > now()`) y las agrupa por día.
+- La agenda permite abrir el detalle de cada cita para reprogramarla, marcarla como realizada o cancelarla.
+- `DashboardScreen` ahora expone dos accesos rápidos: `Agendar cita express` y `Ver agenda`.
+- El formulario express está pensado para velocidad: motivo + médico/especialidad/institución + fecha/hora; el resto queda detrás de `Detalles opcionales`.
+- En web, `DatePickerField` usa un input `datetime-local` visible y editable para evitar pickers invisibles en navegador.
+- Al guardar una cita futura desde el flujo express, `add-visit.tsx` limpia el formulario y redirige directamente a `appointments`.
+- Dentro de `add-visit`, el campo de médico ya muestra coincidencias de `medical_directory_favorites` mientras el usuario escribe, y si el especialista no está ahí se puede abrir el directorio completo sin perder los demás datos de la cita.
+
+---
+
+## Flujo 4H: Cerrar sesión desde Perfil en web y móvil
+
+```
+Usuario                    ProfileTab                  AuthStore / Router
+   |                           |                                |
+   |-- toca "Cerrar sesión" -->|-- web: confirm()              |
+   |                           |-- móvil: Alert.alert()        |
+   |-- confirma -------------->|-- signOut(scope='local') ---->|
+   |                           |-- reset stores -------------->|
+   |<-- va a /login -----------|                                |
+```
+
+**Notas actuales:**
+- El botón de logout ahora usa una confirmación compatible con web y móvil.
+- Además de cerrar auth, se limpian stores auxiliares como familia y notificaciones para evitar estados colgados después del logout.
+
+---
+
+## Flujo 4I: Tab Medicamentos enfocado por familiar sin loop
+
+**Notas actuales:**
+- `medications.tsx` ya no mantiene un estado intermedio de miembro preferido separado del `memberId` de la ruta.
+- La selección inicial del familiar ahora se estabiliza antes de recargar dosis.
+- El refresh al volver al foco solo vuelve a cargar el familiar ya seleccionado, evitando loops al entrar con el primer miembro por defecto.
+
+---
+
+## Flujo 4J: Dictado del médico dentro de la visita
+
+```
+Usuario                 Detalle de visita               voice-to-data / Supabase
+  |                            |                                  |
+  |-- toca micrófono --------->|-- VoiceRecordButton ------------>|
+  |                            |-- STT nativo + audio original -->|
+  |-- termina consulta ------->|-- invoke voice-to-data --------->|
+  |                            |<-- JSON estructurado ------------|
+  |-- revisa extracción ------>|                                  |
+  |-- guarda ----------------->|-- UPDATE medical_visits -------->|
+  |                            |-- INSERT medical_documents ----->|
+  |                            |-- RPC confirm_document... ------>|
+  |<-- ve meds/exámenes -------|                                  |
+```
+
+**Notas actuales:**
+- `visit/[id].tsx` incluye una sección `Consulta por voz` para capturar lo que dice el médico sin salir del detalle.
+- La transcripción completa se guarda en `medical_visits.voice_note_text` y además se crea un `medical_document` tipo `voice_note` ligado a la visita.
+- Los medicamentos y exámenes detectados se crean como registros estructurados usando `confirm_document_and_create_records`.
+- Las terapias y recomendaciones se conservan en `parsed_json` y se resumen dentro de `notes` / observaciones porque aún no existe una tabla dedicada para terapias.
 
 ---
 

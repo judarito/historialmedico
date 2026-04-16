@@ -44,8 +44,56 @@ function inferVisitSpecialty(details: MedicalDirectoryPlace | null): string {
 }
 
 export default function DoctorPlaceDetailsScreen() {
-  const params = useLocalSearchParams<{ id?: string }>();
+  const params = useLocalSearchParams<{
+    id?: string;
+    memberId?: string | string[];
+    memberName?: string | string[];
+    mode?: string | string[];
+    defaultFuture?: string | string[];
+    visitDate?: string | string[];
+    doctorName?: string | string[];
+    specialty?: string | string[];
+    institutionName?: string | string[];
+    reasonForVisit?: string | string[];
+    diagnosis?: string | string[];
+    notes?: string | string[];
+    weightKg?: string | string[];
+    heightCm?: string | string[];
+    temperatureC?: string | string[];
+    bloodPressure?: string | string[];
+    heartRate?: string | string[];
+    showOptionalDetails?: string | string[];
+    showVitals?: string | string[];
+  }>();
   const placeId = typeof params.id === 'string' ? params.id : '';
+
+  function getReturnParam(key: keyof typeof params): string {
+    const value = params[key];
+    return typeof value === 'string' ? value : '';
+  }
+
+  function buildAddVisitContext() {
+    return {
+      memberId: getReturnParam('memberId'),
+      memberName: getReturnParam('memberName'),
+      mode: getReturnParam('mode'),
+      defaultFuture: getReturnParam('defaultFuture'),
+      visitDate: getReturnParam('visitDate'),
+      doctorName: getReturnParam('doctorName'),
+      specialty: getReturnParam('specialty'),
+      institutionName: getReturnParam('institutionName'),
+      reasonForVisit: getReturnParam('reasonForVisit'),
+      diagnosis: getReturnParam('diagnosis'),
+      notes: getReturnParam('notes'),
+      weightKg: getReturnParam('weightKg'),
+      heightCm: getReturnParam('heightCm'),
+      temperatureC: getReturnParam('temperatureC'),
+      bloodPressure: getReturnParam('bloodPressure'),
+      heartRate: getReturnParam('heartRate'),
+      showOptionalDetails: getReturnParam('showOptionalDetails'),
+      showVitals: getReturnParam('showVitals'),
+    };
+  }
 
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -128,6 +176,7 @@ export default function DoctorPlaceDetailsScreen() {
     router.push({
       pathname: '/(app)/add-visit',
       params: {
+        ...buildAddVisitContext(),
         doctorName: isSpecialist ? details.display_name : '',
         specialty: inferVisitSpecialty(details),
         institutionName: isSpecialist ? '' : details.display_name,

@@ -28,10 +28,15 @@ export default function DashboardRoute() {
       appointments={3}
       reminders={2}
       steps={5}
+      directoryFavorites={0}
       criticalAlerts={1}
       members={MOCK_MEMBERS}
       onMemberPress={(id) => console.log('member', id)}
       onNotifications={handleSignOut}
+      onSearch={() => console.log('search')}
+      onMedicalDirectory={() => console.log('directory')}
+      onQuickSchedule={() => router.push({ pathname: '/(app)/add-visit', params: { mode: 'schedule', defaultFuture: '1' } })}
+      onAppointmentsCalendar={() => router.push('/(app)/appointments')}
     />
   );
 }

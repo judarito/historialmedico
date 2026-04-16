@@ -55,7 +55,27 @@ function isGoogleSource(source: MedicalDirectoryPlace['source']) {
 }
 
 export default function DoctorDirectoryScreen() {
-  const params = useLocalSearchParams<{ favorites?: string | string[] }>();
+  const params = useLocalSearchParams<{
+    favorites?: string | string[];
+    memberId?: string | string[];
+    memberName?: string | string[];
+    mode?: string | string[];
+    defaultFuture?: string | string[];
+    visitDate?: string | string[];
+    doctorName?: string | string[];
+    specialty?: string | string[];
+    institutionName?: string | string[];
+    reasonForVisit?: string | string[];
+    diagnosis?: string | string[];
+    notes?: string | string[];
+    weightKg?: string | string[];
+    heightCm?: string | string[];
+    temperatureC?: string | string[];
+    bloodPressure?: string | string[];
+    heartRate?: string | string[];
+    showOptionalDetails?: string | string[];
+    showVitals?: string | string[];
+  }>();
   const [query, setQuery] = useState('');
   const [cities, setCities] = useState<FilterOption[]>([]);
   const [specialties, setSpecialties] = useState<FilterOption[]>([]);
@@ -80,6 +100,34 @@ export default function DoctorDirectoryScreen() {
   const selectedCityOption = cities.find((city) => city.slug === selectedCity) ?? null;
   const selectedSpecialtyOption = specialties.find((specialty) => specialty.slug === selectedSpecialty) ?? null;
   const hasActiveFavoriteFilters = Boolean(query.trim() || selectedCity || selectedSpecialty);
+
+  function getReturnParam(key: keyof typeof params): string {
+    const value = params[key];
+    return typeof value === 'string' ? value : '';
+  }
+
+  function buildAddVisitContext() {
+    return {
+      memberId: getReturnParam('memberId'),
+      memberName: getReturnParam('memberName'),
+      mode: getReturnParam('mode'),
+      defaultFuture: getReturnParam('defaultFuture'),
+      visitDate: getReturnParam('visitDate'),
+      doctorName: getReturnParam('doctorName'),
+      specialty: getReturnParam('specialty'),
+      institutionName: getReturnParam('institutionName'),
+      reasonForVisit: getReturnParam('reasonForVisit'),
+      diagnosis: getReturnParam('diagnosis'),
+      notes: getReturnParam('notes'),
+      weightKg: getReturnParam('weightKg'),
+      heightCm: getReturnParam('heightCm'),
+      temperatureC: getReturnParam('temperatureC'),
+      bloodPressure: getReturnParam('bloodPressure'),
+      heartRate: getReturnParam('heartRate'),
+      showOptionalDetails: getReturnParam('showOptionalDetails'),
+      showVitals: getReturnParam('showVitals'),
+    };
+  }
 
   useEffect(() => {
     void loadFilters();
@@ -256,6 +304,7 @@ export default function DoctorDirectoryScreen() {
     router.push({
       pathname: '/(app)/add-visit',
       params: {
+        ...buildAddVisitContext(),
         doctorName: isSpecialist ? item.display_name : '',
         specialty: inferVisitSpecialty(item),
         institutionName: isSpecialist ? '' : item.display_name,
@@ -266,7 +315,13 @@ export default function DoctorDirectoryScreen() {
   }
 
   function openDetails(item: MedicalDirectoryPlace) {
-    router.push(`/(app)/doctor-place/${item.id}`);
+    router.push({
+      pathname: '/(app)/doctor-place/[id]',
+      params: {
+        id: item.id,
+        ...buildAddVisitContext(),
+      },
+    });
   }
 
   async function toggleFavorite(item: MedicalDirectoryPlace) {

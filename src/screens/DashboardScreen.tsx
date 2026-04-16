@@ -40,6 +40,8 @@ interface DashboardScreenProps {
   onNotifications: () => void;
   onSearch:        () => void;
   onMedicalDirectory: () => void;
+  onQuickSchedule: () => void;
+  onAppointmentsCalendar: () => void;
 }
 
 export function DashboardScreen({
@@ -55,6 +57,8 @@ export function DashboardScreen({
   onNotifications,
   onSearch,
   onMedicalDirectory,
+  onQuickSchedule,
+  onAppointmentsCalendar,
 }: DashboardScreenProps) {
   return (
     <SafeAreaView style={styles.safe}>
@@ -113,6 +117,35 @@ export function DashboardScreen({
             <Text style={styles.directoryBadgeLabel}>guardados</Text>
           </View>
         </TouchableOpacity>
+
+        <View style={styles.sectionHeader}>
+          <Text style={styles.sectionTitle}>Citas futuras</Text>
+          <TouchableOpacity onPress={onAppointmentsCalendar} activeOpacity={0.8}>
+            <Text style={styles.seeAll}>Ver agenda</Text>
+          </TouchableOpacity>
+        </View>
+
+        <View style={styles.schedulerActions}>
+          <TouchableOpacity style={[styles.schedulerCard, styles.schedulerCardPrimary]} onPress={onQuickSchedule} activeOpacity={0.85}>
+            <View style={styles.schedulerIconPrimary}>
+              <Ionicons name="add-circle-outline" size={18} color={Colors.white} />
+            </View>
+            <View style={styles.schedulerCopy}>
+              <Text style={styles.schedulerTitlePrimary}>Agendar cita express</Text>
+              <Text style={styles.schedulerTextPrimary}>Crea una cita futura en pocos toques.</Text>
+            </View>
+          </TouchableOpacity>
+
+          <TouchableOpacity style={styles.schedulerCard} onPress={onAppointmentsCalendar} activeOpacity={0.85}>
+            <View style={styles.schedulerIconSecondary}>
+              <Ionicons name="calendar-outline" size={18} color={Colors.primary} />
+            </View>
+            <View style={styles.schedulerCopy}>
+              <Text style={styles.schedulerTitle}>Ver agenda / scheduler</Text>
+              <Text style={styles.schedulerText}>Revisa próximas citas agrupadas por día.</Text>
+            </View>
+          </TouchableOpacity>
+        </View>
 
         {/* Resumen de Salud */}
         <Text style={styles.sectionTitle}>Resumen de Salud</Text>
@@ -342,6 +375,64 @@ const styles = StyleSheet.create({
     color: Colors.textSecondary,
     fontSize: Typography.xs,
     fontWeight: Typography.medium,
+  },
+  schedulerActions: {
+    gap: Spacing.sm,
+    marginBottom: Spacing.xl,
+  },
+  schedulerCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.md,
+    backgroundColor: Colors.surface,
+    borderRadius: Radius.xl,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    padding: Spacing.md,
+  },
+  schedulerCardPrimary: {
+    backgroundColor: Colors.primary + '18',
+    borderColor: Colors.primary + '44',
+  },
+  schedulerIconPrimary: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: Colors.primary,
+  },
+  schedulerIconSecondary: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: Colors.primary + '15',
+  },
+  schedulerCopy: {
+    flex: 1,
+    gap: 4,
+  },
+  schedulerTitlePrimary: {
+    color: Colors.textPrimary,
+    fontSize: Typography.base,
+    fontWeight: Typography.bold,
+  },
+  schedulerTextPrimary: {
+    color: Colors.textSecondary,
+    fontSize: Typography.sm,
+    lineHeight: 20,
+  },
+  schedulerTitle: {
+    color: Colors.textPrimary,
+    fontSize: Typography.base,
+    fontWeight: Typography.bold,
+  },
+  schedulerText: {
+    color: Colors.textSecondary,
+    fontSize: Typography.sm,
+    lineHeight: 20,
   },
 
   // Stats

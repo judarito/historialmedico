@@ -24,11 +24,13 @@ function getMemberDisplayName(member: Database['public']['Tables']['family_membe
 }
 
 export default function MedicationsTab() {
-  const { memberId } = useLocalSearchParams<{ memberId?: string }>();
+  const params = useLocalSearchParams<{ memberId?: string | string[] }>();
+  const routeMemberId = Array.isArray(params.memberId)
+    ? (params.memberId[0] ?? null)
+    : (params.memberId ?? null);
   const { family, members, fetchMembers } = useFamilyStore();
   const { doses, loading, marking, fetchTodayDoses, markDose } = useMedicationStore();
   const [selectedMember, setSelectedMember] = useState<string | null>(null);
-  const [preferredMemberId, setPreferredMemberId] = useState<string | null>(memberId ?? null);
   const selectedMemberRef = useRef<string | null>(null);
   const inFlightMemberLoadRef = useRef<string | null>(null);
   const lastMemberLoadRef = useRef<{ memberId: string | null; at: number }>({ memberId: null, at: 0 });
@@ -38,10 +40,6 @@ export default function MedicationsTab() {
   useEffect(() => {
     selectedMemberRef.current = selectedMember;
   }, [selectedMember]);
-
-  useEffect(() => {
-    setPreferredMemberId(memberId ?? null);
-  }, [memberId]);
 
   const ensureMembersLoaded = useCallback(async (forceRefresh = false) => {
     let currentMembers = useFamilyStore.getState().members;
@@ -108,13 +106,14 @@ export default function MedicationsTab() {
       }
 
       setSelectedMember((currentSelected) => {
-        const requestedMember = preferredMemberId
-          ? currentMembers.find((member) => member.id === preferredMemberId)
+        const requestedMember = routeMemberId
+          ? currentMembers.find((member) => member.id === routeMemberId)
           : null;
         const preservedMember = currentSelected
           ? currentMembers.find((member) => member.id === currentSelected)
           : null;
-        return (requestedMember ?? preservedMember ?? currentMembers[0]).id;
+        const nextMemberId = (requestedMember ?? preservedMember ?? currentMembers[0]).id;
+        return currentSelected === nextMemberId ? currentSelected : nextMemberId;
       });
     }
 
@@ -122,7 +121,7 @@ export default function MedicationsTab() {
     return () => {
       cancelled = true;
     };
-  }, [ensureMembersLoaded, preferredMemberId]);
+  }, [ensureMembersLoaded, routeMemberId]);
 
   useEffect(() => {
     if (!selectedMember) {
@@ -134,52 +133,27 @@ export default function MedicationsTab() {
   }, [loadMemberData, selectedMember]);
 
   useFocusEffect(useCallback(() => {
-    let cancelled = false;
-
-    async function refreshOnFocus() {
-      const currentMembers = await ensureMembersLoaded();
-      if (cancelled) return;
-
-      if (currentMembers.length === 0) {
-        setSelectedMember(null);
-        setExpiringMeds([]);
-        return;
-      }
-
-      const requestedMember = preferredMemberId
-        ? currentMembers.find((member) => member.id === preferredMemberId)
-        : null;
-      const preservedMember = selectedMemberRef.current
-        ? currentMembers.find((member) => member.id === selectedMemberRef.current)
-        : null;
-      const nextMemberId = (requestedMember ?? preservedMember ?? currentMembers[0]).id;
-
-      if (selectedMemberRef.current !== nextMemberId) {
-        setSelectedMember(nextMemberId);
-        return;
-      }
-
-      const now = Date.now();
-      const lastFocusRefresh = lastFocusRefreshRef.current;
-      if (
-        lastFocusRefresh.memberId === nextMemberId
-        && now - lastFocusRefresh.at < 2000
-      ) {
-        return;
-      }
-
-      lastFocusRefreshRef.current = { memberId: nextMemberId, at: now };
-      void loadMemberData(nextMemberId, { force: true });
+    const memberIdToRefresh = selectedMemberRef.current;
+    if (!memberIdToRefresh) {
+      return;
     }
 
-    void refreshOnFocus();
-    return () => {
-      cancelled = true;
-    };
-  }, [ensureMembersLoaded, preferredMemberId, loadMemberData]));
+    const now = Date.now();
+    const lastFocusRefresh = lastFocusRefreshRef.current;
+    if (
+      lastFocusRefresh.memberId === memberIdToRefresh
+      && now - lastFocusRefresh.at < 2000
+    ) {
+      return;
+    }
+
+    lastFocusRefreshRef.current = { memberId: memberIdToRefresh, at: now };
+    void loadMemberData(memberIdToRefresh, { force: true });
+
+    return undefined;
+  }, [loadMemberData]));
 
   function selectMember(id: string) {
-    setPreferredMemberId(null);
     setSelectedMember(id);
   }
 
